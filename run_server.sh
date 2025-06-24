@@ -21,6 +21,6 @@ echo "Python 경로: $PYTHONPATH"
 # FastAPI 서버 실행 (자동 분석 전용)
 echo "자동 분석 서버 실행 중..."
 echo "서버 시작 시 S3 영상 자동 분석이 시작됩니다."
-python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8001
+python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8002
 
 echo "서버가 종료되었습니다." 
