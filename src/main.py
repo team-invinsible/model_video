@@ -101,8 +101,8 @@ emotion_analyzer = EmotionAnalyzer()
 eye_tracking_analyzer = EyeTrackingAnalyzer()
 gpt_analyzer = GPTAnalyzer()
 
-# --- 신규 API 엔드포인트 ---
-@app.post("/analyze/attitude", response_model=AnalysisResponse)
+# --- 영상 수신 API 엔드포인트 ---
+@app.post("/analysis/attitude", response_model=AnalysisResponse)
 async def analyze_video_from_s3_key(payload: AnalysisPayload, background_tasks: BackgroundTasks):
     """
     메인 서버로부터 S3 Object Key를 받아 영상 분석을 시작합니다.
