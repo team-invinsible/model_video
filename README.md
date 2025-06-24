@@ -121,7 +121,33 @@ conda list | grep opencv
 conda list | grep fastapi
 ```
 
-### 3. 대안: 수동 환경 설정
+### 3. Python venv 가상환경 설정 (대안)
+
+```bash
+# Python 3.9+ 설치 확인
+python3 --version
+
+# 가상환경 생성
+python3 -m venv new_pipeline
+
+# 가상환경 활성화
+# macOS/Linux
+source new_pipeline/bin/activate
+# Windows
+# new_pipeline\Scripts\activate
+
+# pip 업그레이드
+pip install --upgrade pip setuptools wheel
+
+# 패키지 설치
+pip install -r requirements.txt
+
+# 설치 확인
+pip list | grep fastapi
+pip list | grep opencv
+```
+
+### 4. 대안: Conda 수동 환경 설정
 
 ```bash
 # Conda 환경 생성 (Python 3.9 권장)
@@ -137,7 +163,7 @@ conda install -c conda-forge pip setuptools wheel -y
 pip install -r requirements.txt
 ```
 
-### 4. 환경변수 설정
+### 5. 환경변수 설정
 
 프로젝트 루트에 `.env` 파일을 생성하세요:
 
@@ -166,7 +192,7 @@ OPENAI_MODEL=gpt-4
 LOG_LEVEL=INFO
 ```
 
-### 5. 데이터베이스 초기화
+### 6. 데이터베이스 초기화
 
 **MongoDB 시작:**
 ```bash
