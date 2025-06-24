@@ -1,0 +1,291 @@
+# ----
+# 작성목적 : 면접 태도 분석을 위한 GPT 프롬프트 및 키워드 생성 설정
+# 작성일 : 2025-01-10
+
+# 변경사항 내역 (날짜 | 변경목적 | 변경내용 | 작성자 순으로 기입)
+# 2025-01-10 | 최초 구현 | YAML 기반 키워드 생성 시스템 구축 | 이재인
+# ----
+
+# 면접 태도 분석 프롬프트
+interview_attitude_analysis:
+  system_prompt: |
+    당신은 면접 태도 분석 전문가입니다. 
+    제공된 표정 분석과 시선 추적 결과를 바탕으로 면접자의 강점과 약점 키워드를 추출해주세요.
+    
+    응답은 반드시 아래 YAML 형식으로만 제공해주세요:
+    ```yaml
+    strength_keywords:
+      - "키워드1"
+      - "키워드2" 
+      - "키워드3"
+    weakness_keywords:
+      - "키워드1"
+      - "키워드2"
+    analysis_summary: "간단한 한 줄 요약"
+    ```
+
+  user_prompt_template: |
+    다음은 면접자의 분석 결과입니다:
+    
+    **표정 분석 결과:**
+    - 표정 점수: {emotion_score}/60점
+    - 주요 감정: {dominant_emotions}
+    - 감정 안정성: {emotion_stability}
+    
+    **시선 추적 결과:**
+    - 시선 점수: {eye_score}/40점
+    - 집중도: {concentration_score}
+    - 안정성: {stability_score}
+    - 깜빡임 점수: {blink_score}
+    
+    **부정행위 감지:**
+    - 총 위반 횟수: {total_violations}회
+    - 다중 얼굴 감지: {face_multiple_detected}
+    - 커닝 의심: {suspected_copying}
+    - 대리시험 의심: {suspected_impersonation}
+    
+    위 분석 결과를 바탕으로 강점과 약점 키워드를 추출해주세요.
+
+# GPT 상세 분석 프롬프트 (레거시/fallback 용)
+detailed_gpt_analysis:
+  system_prompt: |
+    당신은 면접 태도 분석 전문가입니다.
+    아래 JSON 데이터는 면접 영상에 대한 표정(emotion) 및 시선(eye_tracking) 분석 결과입니다. 
+    이 데이터를 바탕으로 지원자의 면접 태도를 종합적으로 평가해주세요.
+
+  evaluation_guidelines: |
+    # SKAI AI 면접 태도 평가 가이드라인
+
+    ## 평가 구성
+    - **총점**: 100점 (표정 60점 + 시선움직임 20점 + 눈깜빡임 20점)
+    - **각 질문당**: 3-4줄 평가
+
+    ## 평가 형식
+
+    ### 점수별 템플릿
+
+    **우수 (80점 이상):**
+    "지원자는 면접 과정에서 [안정적인/차분하고 집중된] 자세를 유지하며 높은 참여도를 보였습니다. 표정 분석 결과, [풍부한/일관된 긍정적인] 감정 표현이 자연스럽게 나타났습니다. [꾸준한 화면 응시/뛰어난 집중도]를 보였으며, 눈 깜빡임은 [자연스러운 리듬/정상적인 패턴]으로 편안한 상태임을 확인할 수 있습니다."
+
+    **보통 (60-79점):**
+    "지원자는 면접 과정에서 [전반적으로 무난한/적절한] 자세를 보이며 보통 수준의 참여도를 나타냈습니다. 표정 분석 결과, [기본적인/다소 제한적인] 감정 표현이 관찰되었습니다. [간헐적인 시선 이동/보통 수준의 화면 집중도]를 보였으며, 눈 깜빡임은 허용 범위 내에 있어 약간의 긴장감이 있는 상태로 확인됩니다."
+
+    **미흡 (60점 미만):**
+    "지원자는 면접 과정에서 [다소 경직된/제한적인] 자세를 보이며 낮은 참여도를 나타냈습니다. 표정 분석 결과, [표정 변화가 제한적/경직된 감정 상태]이 지속적으로 관찰되었습니다. [불안정한 시선 움직임/낮은 화면 집중도]를 보였으며, 눈 깜빡임 패턴이 비정상적으로 나타나 긴장된 상태임을 확인할 수 있습니다."
+
+    ## 작성 지침
+    - 점수에 따라 해당 템플릿 선택
+    - 대괄호 안에서 적절한 표현 선택
+    - 과거형으로 통일하여 작성
+    - 자연스러운 한국어 표현 사용
+    - JSON 형식 없이 순수 텍스트로만 응답
+
+  user_prompt_template: |
+    분석 데이터: {analysis_data}
+
+    위 분석 데이터를 바탕으로 4줄(300자이내) 평가를 순수 텍스트로만 작성해주세요:
+
+# 동적 피드백 생성 템플릿
+dynamic_feedback:
+  templates:
+    excellent: # 80점 이상
+      - "면접자는 매우 안정적이고 집중된 자세로 면접에 임했습니다. 자연스러운 감정 표현과 꾸준한 시선 유지가 인상적이었습니다."
+      - "우수한 면접 태도를 보여주었습니다. 긍정적인 표정과 안정적인 시선으로 높은 참여도를 나타냈습니다."
+      - "면접 과정 전반에서 차분하고 전문적인 자세를 유지했습니다. 감정 조절력과 집중력이 뛰어났습니다."
+    
+    good: # 60-79점
+      - "전반적으로 양호한 면접 태도를 보였습니다. 적절한 감정 표현과 보통 수준의 집중력을 나타냈습니다."
+      - "무난한 면접 자세로 임했습니다. 기본적인 태도는 갖추었으나 더 적극적인 표현이 필요해 보입니다."
+      - "보통 수준의 참여도를 보였습니다. 안정적이지만 다소 경직된 모습이 관찰되었습니다."
+    
+    needs_improvement: # 60점 미만
+      - "면접 태도에 개선이 필요합니다. 긴장감이 많이 느껴지며 자연스러운 표현력 향상이 필요해 보입니다."
+      - "다소 경직된 자세와 제한적인 감정 표현이 관찰되었습니다. 면접 연습을 통한 개선이 권장됩니다."
+      - "불안정한 시선과 표정 변화가 제한적이었습니다. 자신감 있는 태도 개발이 필요합니다."
+  
+  modifiers:
+    positive_traits:
+      - "자연스러운 미소"
+      - "안정적인 시선"
+      - "적절한 감정 표현"
+      - "집중된 자세"
+      - "진실한 태도"
+    
+    areas_for_improvement:
+      - "표정 다양성"
+      - "시선 안정성"
+      - "감정 표현력"
+      - "집중도 향상"
+      - "자신감 개발"
+
+# 피드백 조합 규칙
+feedback_generation_rules:
+  base_selection:
+    score_ranges:
+      excellent: [80, 100]
+      good: [60, 79]
+      needs_improvement: [0, 59]
+  
+  enhancement_conditions:
+    high_emotion_score: # 표정 점수 50점 이상
+      add_positive: ["자연스러운 미소", "적절한 감정 표현"]
+    
+    high_eye_score: # 시선 점수 32점 이상
+      add_positive: ["안정적인 시선", "집중된 자세"]
+    
+    low_emotion_score: # 표정 점수 30점 미만
+      add_improvement: ["표정 다양성", "감정 표현력"]
+    
+    low_eye_score: # 시선 점수 16점 미만
+      add_improvement: ["시선 안정성", "집중도 향상"]
+    
+    cheating_detected: # 부정행위 감지
+      add_improvement: ["신뢰성 개발", "성실한 태도"]
+
+# 키워드 카테고리별 분류
+keyword_categories:
+  # 강점 키워드 풀
+  strengths:
+    eye_contact:
+      - "안정적 시선"
+      - "적절한 아이컨택트"
+      - "집중적 시선"
+      - "자연스러운 시선 유지"
+    
+    concentration:
+      - "높은 집중도"
+      - "안정적 집중력"
+      - "지속적 주의력"
+      - "우수한 몰입도"
+    
+    emotion_control:
+      - "감정 조절력"
+      - "안정적 표정"
+      - "자연스러운 미소"
+      - "긍정적 표현력"
+    
+    professional_attitude:
+      - "진실한 태도"
+      - "성실한 자세"
+      - "신뢰할 수 있는 모습"
+      - "전문적 태도"
+
+  # 약점 키워드 풀  
+  weaknesses:
+    eye_issues:
+      - "시선 분산"
+      - "부적절한 시선 처리"
+      - "시선 불안정"
+      - "아이컨택트 부족"
+    
+    concentration_issues:
+      - "집중력 저하"
+      - "주의력 분산"
+      - "불안정한 집중도"
+      - "몰입도 부족"
+    
+    emotion_issues:
+      - "감정 기복"
+      - "표정 경직"
+      - "부자연스러운 표현"
+      - "감정 표현 미흡"
+    
+    behavioral_concerns:
+      - "부정행위 의심"
+      - "신뢰성 문제"
+      - "태도 불성실"
+      - "비협조적 자세"
+
+# 점수 기반 키워드 매핑 규칙
+scoring_rules:
+  emotion_score:
+    excellent: # 50-60점
+      threshold: 50
+      strength_keywords: ["안정적 표정", "자연스러운 미소", "긍정적 표현력"]
+      weakness_keywords: []
+    
+    good: # 40-49점  
+      threshold: 40
+      strength_keywords: ["적절한 감정 표현"]
+      weakness_keywords: []
+    
+    fair: # 30-39점
+      threshold: 30
+      strength_keywords: []
+      weakness_keywords: ["표정 개선 필요"]
+    
+    poor: # 0-29점
+      threshold: 0
+      strength_keywords: []
+      weakness_keywords: ["표정 경직", "감정 표현 미흡"]
+
+  eye_score:
+    excellent: # 32-40점
+      threshold: 32
+      strength_keywords: ["안정적 시선", "높은 집중도", "적절한 아이컨택트"]
+      weakness_keywords: []
+    
+    good: # 24-31점
+      threshold: 24  
+      strength_keywords: ["적절한 시선 유지"]
+      weakness_keywords: []
+    
+    fair: # 16-23점
+      threshold: 16
+      strength_keywords: []
+      weakness_keywords: ["시선 개선 필요"]
+    
+    poor: # 0-15점
+      threshold: 0
+      strength_keywords: []
+      weakness_keywords: ["시선 분산", "집중력 저하"]
+
+  # 부정행위 기반 키워드
+  cheating_detection:
+    clean: # 위반 없음
+      total_violations: 0
+      face_multiple: false
+      strength_keywords: ["진실한 태도", "신뢰할 수 있는 모습"]
+      weakness_keywords: []
+    
+    minor_violations: # 1-4회 위반
+      total_violations: 4
+      face_multiple: false
+      strength_keywords: []
+      weakness_keywords: ["주의력 분산"]
+    
+    major_violations: # 5회 이상 위반
+      total_violations: 5
+      face_multiple: false
+      strength_keywords: []
+      weakness_keywords: ["부정행위 의심", "신뢰성 문제"]
+    
+    impersonation_risk: # 다중 얼굴 감지
+      face_multiple: true
+      strength_keywords: []
+      weakness_keywords: ["대리시험 의심", "신뢰성 문제"]
+
+# 키워드 조합 제한
+keyword_limits:
+  max_strength_keywords: 4
+  max_weakness_keywords: 3
+  min_total_keywords: 2
+  avoid_contradictions: true  # 모순되는 키워드 조합 방지
+
+# 키워드 우선순위 (높을수록 우선 선택)
+keyword_priorities:
+  strength:
+    "안정적 시선": 10
+    "높은 집중도": 9
+    "진실한 태도": 8
+    "적절한 아이컨택트": 7
+    "자연스러운 미소": 6
+    "긍정적 표현력": 5
+    
+  weakness:
+    "부정행위 의심": 10
+    "대리시험 의심": 10
+    "시선 분산": 8
+    "집중력 저하": 7
+    "표정 경직": 6
+    "감정 표현 미흡": 5 
