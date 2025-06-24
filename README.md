@@ -18,11 +18,11 @@ S3에 저장된 webm 영상을 분석하여 **감정 분석**과 **시선 추적
 ```
 model_video/                           # 프로젝트 루트 디렉토리
 ├── 📄 README.md                       # 프로젝트 문서 (현재 파일)
-├── 📄 requirements.txt                # Python 의존성 패키지 목록
-├── 🔧 install_dependencies.sh         # 의존성 자동 설치 스크립트
+├── 📄 requirements.txt                # Python 의존성 패키지 목록 (레거시)
+├── 📄 environment.yml                 # Conda 환경 설정 파일 (권장)
 ├── 🚀 run_server.sh                   # 서버 실행 스크립트
-├── 📊 계산/                          # 분석 결과 저장소
-│   └── cheating_detected.jsonl       # 부정행위 감지 로그
+├── 📊 logs/                          # 분석 로그 저장소
+│   └── recalib_log.jsonl             # 재보정 로그
 └── 📦 src/                           # 소스코드 메인 디렉토리
     ├── 🎯 main.py                    # FastAPI 애플리케이션 진입점
     ├── 📁 temp_uploads/              # 임시 파일 저장 공간
@@ -57,8 +57,10 @@ model_video/                           # 프로젝트 루트 디렉토리
     │       ├── cheat_cal.py          # 부정행위 감지 계산
     │       ├── total_eval_calc.py    # 전체 평가 점수 계산
     │       └── *.jsonl               # 계산 결과 저장
-    └── 🧠 llm/                       # GPT 분석 모듈
-        └── gpt_analyzer.py           # OpenAI GPT 피드백 생성
+    └── 🧠 llm/                       # LLM 분석 모듈
+        ├── gpt_analyzer.py           # OpenAI GPT 피드백 생성
+        ├── keyword_analyzer.py       # 키워드 추출 및 분석
+        └── interview_prompts.yaml    # GPT 프롬프트 템플릿
 ```
 
 ### 🔍 각 모듈의 역할
@@ -84,6 +86,7 @@ model_video/                           # 프로젝트 루트 디렉토리
 
 #### 5. **llm/** - 인공지능 피드백
 - GPT-4 API를 통한 종합 분석
+- 키워드 기반 분석 및 카테고리별 점수
 - 개인화된 면접 개선 제안
 
 ## 🛠️ 설치 및 설정
@@ -101,31 +104,37 @@ sudo apt update
 sudo apt install ffmpeg mongodb mariadb-server python3-dev
 ```
 
-### 2. Conda 환경 설정
-
-```bash
-# Conda 환경 생성 (Python 3.9 권장)
-conda create -n model_video python=3.9 -y
-
-# 환경 활성화
-conda activate model_video
-
-# 기본 패키지 설치
-conda install -c conda-forge opencv numpy pandas -y
-```
-
-### 3. Python 의존성 설치
+### 2. Conda 환경 설정 (권장)
 
 ```bash
 # 프로젝트 디렉토리로 이동
 cd model_video
 
-# pip를 통한 패키지 설치
-pip install -r requirements.txt
+# environment.yml을 사용한 자동 환경 구성
+conda env create -f environment.yml
 
-# 또는 자동 설치 스크립트 실행
-chmod +x install_dependencies.sh
-./install_dependencies.sh
+# 환경 활성화
+conda activate new_pipeline
+
+# 설치 확인
+conda list | grep opencv
+conda list | grep fastapi
+```
+
+### 3. 대안: 수동 환경 설정
+
+```bash
+# Conda 환경 생성 (Python 3.9 권장)
+conda create -n new_pipeline python=3.9 -y
+
+# 환경 활성화
+conda activate new_pipeline
+
+# 기본 패키지 설치
+conda install -c conda-forge pip setuptools wheel -y
+
+# pip를 통한 전체 패키지 설치
+pip install -r requirements.txt
 ```
 
 ### 4. 환경변수 설정
@@ -192,7 +201,7 @@ CREATE DATABASE interview_analysis;
 
 ```bash
 # 1. Conda 환경 활성화
-conda activate model_video
+conda activate new_pipeline
 
 # 2. 소스코드 디렉토리로 이동
 cd src
@@ -300,12 +309,15 @@ curl "http://localhost:8000/analysis/recent?limit=10"
 - **감정 분석**: 프레임별 얼굴 검출 → EfficientNet 감정 분류
 - **시선 추적**: MediaPipe 얼굴 랜드마크 → 시선 벡터 계산
 
+
 ### 3단계: 데이터 저장 💾
 - MongoDB: 원시 분석 데이터 및 메타데이터
-- MariaDB: 집계된 점수 및 통계
+- MariaDB: 집계된 점수 및 통계 (새로운 테이블 구조)
 
 ### 4단계: AI 피드백 🧠
 - GPT-4 API 호출로 종합 평가
+- YAML 기반 구조화된 출력
+- 키워드별 카테고리 점수 분석
 - 개인화된 개선 제안 생성
 
 ## 📊 결과 해석 가이드
@@ -322,43 +334,56 @@ curl "http://localhost:8000/analysis/recent?limit=10"
 - **40-59점**: 보통 수준
 - **40점 미만**: 집중도 개선 필요
 
+### 음성 분석 점수
+
+- **말하기 속도**: 적절한 템포 유지 여부
+
 ## 🚨 문제 해결
 
 ### 자주 발생하는 오류들
 
-1. **모델 파일 없음 오류**
+1. **Conda 환경 문제**
+```bash
+# 환경 재생성
+conda env remove -n new_pipeline
+conda env create -f environment.yml
+conda activate new_pipeline
+```
+
+2. **패키지 버전 충돌**
+```bash
+# 환경 업데이트
+conda env update -f environment.yml --prune
+```
+
+3. **모델 파일 없음 오류**
 ```bash
 # EfficientNet 모델 파일 확인
 ls -la src/emotion/model_eff.pth
 # 파일이 없다면 별도로 다운로드 필요
 ```
 
-2. **MongoDB 연결 오류**
+4. **MongoDB 연결 오류**
 ```bash
 # MongoDB 서비스 상태 확인
 brew services list | grep mongodb  # macOS
 sudo systemctl status mongodb      # Linux
 ```
 
-3. **메모리 부족 오류**
+5. **메모리 부족 오류**
 ```bash
 # 시스템 메모리 확인 (최소 8GB 권장)
 free -h  # Linux
 vm_stat  # macOS
 ```
 
-4. **OpenAI API 키 오류**
+6. **OpenAI API 키 오류**
 ```bash
 # .env 파일의 API 키 확인
 cat .env | grep OPENAI_API_KEY
 ```
 
-### 성능 최적화 팁
 
-- **메모리**: 영상 해상도를 720p로 제한
-- **CPU**: 멀티프로세싱으로 병렬 처리
-- **GPU**: CUDA 지원 시 GPU 가속 활용
-- **네트워크**: S3 리전을 서버와 동일하게 설정
 
 ## 🤝 개발에 참여하기
 
@@ -369,9 +394,31 @@ git clone https://github.com/your-username/model_video.git
 # 2. 새 기능 브랜치 생성
 git checkout -b feature/amazing-feature
 
-# 3. 변경사항 커밋
+# 3. 변경사항 커밋 (한글 템플릿 사용)
 git commit -m 'feat(emotion): 새로운 감정 분류 모델 추가'
 
 # 4. 브랜치 푸시
 git push origin feature/amazing-feature
+```
+
+## 📝 커밋 메시지 템플릿
+
+```
+<type>(<scope>): <subject>
+
+[상세 설명 - 필요할 때만 작성]
+
+[Footer - 선택, 예: Resolves: #123]
+```
+
+**type 예시:**
+- `feat`: 새로운 기능 추가
+- `fix`: 버그 수정
+- `docs`: 문서 수정
+- `style`: 코드 포맷팅
+- `refactor`: 코드 리팩토링
+- `test`: 테스트 코드 추가/수정
+- `chore`: 빌드, 패키지 매니저 설정 등
+
+
 
