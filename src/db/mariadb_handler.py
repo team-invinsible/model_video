@@ -17,7 +17,11 @@ import aiomysql
 from datetime import datetime
 import json
 import os
+from dotenv import load_dotenv
 from .models import LLMComment
+
+# 환경변수 로드
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +77,6 @@ class MariaDBHandler:
             ANS_SCORE_ID BIGINT PRIMARY KEY NOT NULL COMMENT '답변 평가 ID (userId0questionNum 형식)',
             INTV_ANS_ID BIGINT NOT NULL COMMENT '면접 답변 ID (userId)',
             ANS_SUMMARY TEXT NULL COMMENT '답변 요약',
-            EVAL_COMMENT TEXT NULL COMMENT '답변 평가',
             EVAL_SUMMARY TEXT NULL COMMENT '전체 평가 요약',
             INCOMPLETE_ANSWER BOOLEAN NULL DEFAULT FALSE COMMENT '미완료 여부',
             INSUFFICIENT_CONTENT BOOLEAN NULL DEFAULT FALSE COMMENT '내용 부족 여부',

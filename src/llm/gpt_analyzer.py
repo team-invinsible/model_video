@@ -352,6 +352,9 @@ class GPTAnalyzer:
             
             print(f"📝 최종 overall_feedback: {overall_feedback}")
             
+            # 강점/약점 키워드 추출
+            strength_keywords, weakness_keywords = self._extract_keywords_from_response(overall_feedback)
+            
             return LLMComment(
                 analysis_id=analysis_id,
                 overall_score=0.0,
@@ -359,8 +362,8 @@ class GPTAnalyzer:
                 attention_feedback="",
                 overall_feedback=overall_feedback,
                 improvement_suggestions=[],
-                strengths=[],
-                weaknesses=[],
+                strengths=strength_keywords,
+                weaknesses=weakness_keywords,
                 emotion_score=0.0,
                 attention_score=0.0,
                 stability_score=0.0
@@ -446,6 +449,45 @@ class GPTAnalyzer:
             print(f"⚠️ LLM fallback 생성 중 오류: {str(e)}")
             
         return None
+
+    def _extract_keywords_from_response(self, response: str) -> tuple[list[str], list[str]]:
+        """GPT 응답에서 강점/약점 키워드 추출"""
+        try:
+            import re
+            
+            strength_keywords = []
+            weakness_keywords = []
+            
+            # 강점 섹션 추출
+            strength_match = re.search(r'강점:\s*\n(.*?)(?=약점:|$)', response, re.DOTALL)
+            if strength_match:
+                strength_text = strength_match.group(1).strip()
+                # 각 줄을 키워드로 분리 (빈 줄 제외)
+                strength_keywords = [line.strip() for line in strength_text.split('\n') if line.strip()]
+                print(f"🔍 추출된 강점 키워드: {strength_keywords}")
+            
+            # 약점 섹션 추출
+            weakness_match = re.search(r'약점:\s*\n(.*?)$', response, re.DOTALL)
+            if weakness_match:
+                weakness_text = weakness_match.group(1).strip()
+                # 각 줄을 키워드로 분리 (빈 줄 제외)
+                weakness_keywords = [line.strip() for line in weakness_text.split('\n') if line.strip()]
+                print(f"🔍 추출된 약점 키워드: {weakness_keywords}")
+            
+            # 키워드가 추출되지 않은 경우 기본값 사용
+            if not strength_keywords:
+                strength_keywords = ["성실한 태도"]
+                print("⚠️ 강점 키워드 추출 실패, 기본값 사용")
+            
+            if not weakness_keywords:
+                weakness_keywords = ["개선 필요"]
+                print("⚠️ 약점 키워드 추출 실패, 기본값 사용")
+            
+            return strength_keywords, weakness_keywords
+            
+        except Exception as e:
+            print(f"❌ 키워드 추출 오류: {e}")
+            return ["성실한 태도"], ["개선 필요"]
 
     def _generate_dynamic_feedback(self, emotion_result: Dict[str, Any], 
                                   eye_tracking_result: Dict[str, Any]):
