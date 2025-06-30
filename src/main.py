@@ -977,11 +977,16 @@ async def process_gpt_batch():
                     suspected_copying = eye_analysis.get('analysis_summary', {}).get('total_violations', 0) >= 5
                     suspected_impersonation = eye_analysis.get('analysis_summary', {}).get('face_multiple_detected', False)
                     
-                    # GPT 분석 결과에서 키워드 추출
+                    # GPT 분석 결과에서 키워드 추출 (LLMComment의 strengths/weaknesses 사용)
+                    strength_keywords = llm_comment.strengths if llm_comment.strengths else ['성실한 태도']
+                    weakness_keywords = llm_comment.weaknesses if llm_comment.weaknesses else ['개선 필요']
+                    
                     gpt_analysis = {
-                        'strength_keyword': '면접 태도 양호, 집중력 우수',
-                        'weakness_keyword': '시선 분산, 부정행위 의심' if suspected_copying else '개선 필요'
+                        'strength_keyword': '\n'.join(strength_keywords),
+                        'weakness_keyword': '\n'.join(weakness_keywords)
                     }
+                    
+                    print(f"🔍 GPT 키워드 추출: 강점={strength_keywords}, 약점={weakness_keywords}")
                     
                     await mariadb_handler.save_interview_attitude(
                         user_id=user_id,
