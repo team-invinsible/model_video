@@ -169,7 +169,7 @@ def find_latest_logs():
 def extract_s3_path_info(video_path_or_s3_path):
     """
     S3 경로에서 userId와 question_num을 추출합니다.
-    경로 형식: skala25a/team12/interview_audio/{userId}/{question_num}
+    경로 형식: skala25a/team12/interview_video/{userId}/{question_num}
     
     Args:
         video_path_or_s3_path (str): S3 경로 또는 비디오 파일 경로
@@ -179,7 +179,7 @@ def extract_s3_path_info(video_path_or_s3_path):
     """
     try:
         # S3 경로 패턴 매칭
-        pattern = r'skala25a/team12/interview_audio/([^/]+)/([^/]+)'
+        pattern = r'skala25a/team12/interview_video/([^/]+)/([^/]+)'
         match = re.search(pattern, video_path_or_s3_path)
         
         if match:
