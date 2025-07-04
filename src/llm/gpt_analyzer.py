@@ -227,16 +227,10 @@ class GPTAnalyzer:
         return ""
     
     async def _apply_rate_limiting(self):
-        """요청 간격 제한 적용 (병렬 처리를 위해 최소한으로)"""
-        current_time = time.time()
-        elapsed = current_time - self.last_request_time
-        
-        if elapsed < self.request_interval:
-            wait_time = self.request_interval - elapsed
-            print(f"⏱️ Rate limiting: {wait_time:.1f}초 대기")
-            await asyncio.sleep(wait_time)
-        
+        """요청 간격 제한 제거 - 병렬 처리를 위해 즉시 실행"""
+        # Rate limiting 완전 제거 - 즉시 실행
         self.last_request_time = time.time()
+        print(f"🚀 Rate limiting 제거됨 - 즉시 실행")
     
     async def _make_api_call(self, prompt: str, model: str) -> str:
         """실제 OpenAI API 호출"""
