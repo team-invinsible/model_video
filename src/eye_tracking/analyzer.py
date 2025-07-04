@@ -243,15 +243,15 @@ class EyeTrackingAnalyzer:
             # S3 key에서 user_id와 question_id 추출 시도
             if s3_key:
                 print(f"🔍 S3 키 파싱 시도: {s3_key}")
-                # S3 키 형식: team12/interview_audio/{user_id}/{question_id}/filename.mp4
+                # S3 키 형식: team12/interview_video/{user_id}/{question_id}/filename.mp4
                 key_parts = s3_key.split('/')
                 print(f"🔍 S3 키 분할: {key_parts}")
                 
-                if len(key_parts) >= 4 and 'interview_audio' in key_parts:
-                    audio_index = key_parts.index('interview_audio')
-                    if audio_index + 2 < len(key_parts):
-                        extracted_user_id = key_parts[audio_index + 1]
-                        extracted_question_id = key_parts[audio_index + 2]
+                if len(key_parts) >= 4 and 'interview_video' in key_parts:
+                    video_index = key_parts.index('interview_video')
+                    if video_index + 2 < len(key_parts):
+                        extracted_user_id = key_parts[video_index + 1]
+                        extracted_question_id = key_parts[video_index + 2]
                         print(f"🔍 S3 key에서 추출: user_id={extracted_user_id}, question_id={extracted_question_id}")
                         
                         # 기존 값이 없는 경우에만 사용

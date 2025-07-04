@@ -19,7 +19,7 @@ from pathlib import Path
 def extract_s3_path_info(video_path_or_s3_path):
     """
     S3 경로에서 userId와 question_num을 추출합니다.
-    경로 형식: */interview_audio/{userId}/{question_num}/* 또는 기타 형식
+    경로 형식: */interview_video/{userId}/{question_num}/* 또는 기타 형식
     
     Args:
         video_path_or_s3_path (str): S3 경로 또는 비디오 파일 경로
@@ -32,8 +32,9 @@ def extract_s3_path_info(video_path_or_s3_path):
         
         # S3 경로 패턴 매칭 (더 포괄적)
         patterns = [
-            r'interview_audio/([^/]+)/([^/]+)',  # */interview_audio/{user_id}/{question_num}/*
-            r'skala25a/team12/interview_audio/([^/]+)/([^/]+)',  # 기존 패턴
+            r'interview_video/([^/]+)/([^/]+)',  # */interview_video/{user_id}/{question_num}/*
+            r'skala25a/team12/interview_video/([^/]+)/([^/]+)',  # team12 패턴
+            r'team12/interview_video/([^/]+)/([^/]+)',  # team12 패턴 (짧은 버전)
             r'/([^/]+)/([^/]+)/[^/]*\.(mp4|webm|mov)',  # /{user_id}/{question_num}/filename.ext
         ]
         

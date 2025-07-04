@@ -113,15 +113,26 @@ async def analyze_video_from_s3_key(payload: AnalysisPayload, background_tasks: 
         
         # S3 키로부터 사용자 ID와 질문 번호 추출
         try:
-            # 예: 'iv001/Q001/video.mp4' -> ('iv001', 'Q001')
+            # 실제 S3 키 형식: skala25a/team12/interview_video/{userId}/{question_num}/*.webm
             parts = s3_key.split('/')
-            if len(parts) < 2:
-                raise IndexError("S3 key does not contain user_id and question_num.")
-            user_id, question_num = parts[0], parts[1]
-        except IndexError:
+            print(f"🔍 S3 키 분할: {parts}")
+            
+            # interview_video 다음에 오는 경로에서 user_id와 question_num 추출
+            if 'interview_video' in parts:
+                video_index = parts.index('interview_video')
+                if video_index + 2 < len(parts):
+                    user_id = parts[video_index + 1]
+                    question_num = parts[video_index + 2]
+                    print(f"🔍 파싱 성공: user_id={user_id}, question_num={question_num}")
+                else:
+                    raise IndexError("interview_video 다음에 user_id와 question_num이 없습니다.")
+            else:
+                raise IndexError("S3 키에 'interview_video' 경로가 없습니다.")
+                
+        except (IndexError, ValueError) as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"잘못된 S3 키 형식입니다. 'user_id/question_num/...' 형식을 기대합니다: {s3_key}"
+                detail=f"잘못된 S3 키 형식입니다. 'skala25a/team12/interview_video/{{user_id}}/{{question_num}}/...' 형식을 기대합니다: {s3_key}"
             )
             
         analysis_id = f"api_s3_analysis_{user_id}_{question_num}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -845,6 +856,14 @@ async def process_s3_user_video_analysis(
         
         # 최종 완료 상태 업데이트
         await update_analysis_status(analysis_id, "completed", None, 100.0)
+        
+        # GPT 배치 분석 큐에 추가 (MariaDB 저장을 위해)
+        await add_to_gpt_batch_queue(analysis_id, user_id, question_num)
+        print(f"📝 GPT 분석 큐에 추가됨: {analysis_id}")
+        
+        # 즉시 GPT 배치 처리 트리거 (백그라운드에서 실행)
+        asyncio.create_task(process_gpt_batch())
+        print(f"🚀 GPT 배치 처리 즉시 트리거됨")
         
         print(f"분석 완료: {analysis_id}")
         
