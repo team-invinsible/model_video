@@ -754,12 +754,6 @@ def process_video(video_path, user_id, question_id, frame_interval=3, show_windo
                 print(f"❌ 얼굴 감지 실패: {str(e)}")
                 face_count = 0
                 faces = []
-                    
-            except Exception as e:
-                print(f"❌ 프레임 처리 중 오류: {str(e)}")
-                frame_count += 1
-                processed_count += 1
-                continue
             
             # 디버깅: 첫 100프레임은 얼굴 감지 상태 출력
             if processed_count < 100 and processed_count % 10 == 0:

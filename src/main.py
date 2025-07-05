@@ -876,6 +876,7 @@ async def process_s3_user_video_analysis(
         print(f"🚀 GPT 배치 처리 즉시 트리거됨")
         
         print(f"분석 완료: {analysis_id}")
+        return analysis_data
         
     except Exception as e:
         print(f"분석 중 오류 발생 ({analysis_id}): {str(e)}")
@@ -897,6 +898,8 @@ async def process_s3_user_video_analysis(
                 save_analysis_result(db, error_data)
         except:
             pass  # 오류 저장 실패는 무시
+        
+        return error_data
             
     finally:
         # 임시 파일 정리
