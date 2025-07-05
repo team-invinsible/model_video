@@ -227,38 +227,23 @@ class EyeTrackingAnalyzer:
         
     async def analyze_video(self, video_path: str, show_window: bool = False, user_id: str = None, question_id: str = None, s3_key: str = None) -> Dict[str, Any]:
         """
-        비디오 파일을 분석하여 시선 추적 결과를 반환합니다. (원본 main.py와 동일한 로직)
+        비디오 파일을 분석하여 시선 추적 결과를 반환합니다.
         
         Args:
             video_path: 분석할 비디오 파일 경로
-            show_window: 시각화 창 표시 여부 (디버깅용)
-            user_id: 사용자 ID (S3 키에서 추출하거나 직접 전달)
-            question_id: 질문 ID (S3 키에서 추출하거나 직접 전달)  
-            s3_key: S3 키 (user_id, question_id 추출용)
+            show_window: 시각화 창 표시 여부
+            user_id: 사용자 ID
+            question_id: 질문 ID
+            s3_key: S3 키 (로깅용)
             
         Returns:
-            Dict[str, Any]: 시선 추적 분석 결과
+            Dict[str, Any]: 분석 결과
         """
         try:
-            # S3 key에서 user_id와 question_id 추출 시도
-            if s3_key:
-                print(f"🔍 S3 키 파싱 시도: {s3_key}")
-                # S3 키 형식: team12/interview_video/{user_id}/{question_id}/filename.mp4
-                key_parts = s3_key.split('/')
-                print(f"🔍 S3 키 분할: {key_parts}")
-                
-                if len(key_parts) >= 4 and 'interview_video' in key_parts:
-                    video_index = key_parts.index('interview_video')
-                    if video_index + 2 < len(key_parts):
-                        extracted_user_id = key_parts[video_index + 1]
-                        extracted_question_id = key_parts[video_index + 2]
-                        print(f"🔍 S3 key에서 추출: user_id={extracted_user_id}, question_id={extracted_question_id}")
-                        
-                        # 기존 값이 없는 경우에만 사용
-                        if not user_id:
-                            user_id = extracted_user_id
-                        if not question_id:
-                            question_id = extracted_question_id
+            print(f"🎯 비동기 시선 추적 분석 시작")
+            print(f"📹 비디오 파일: {video_path}")
+            print(f"👤 사용자: {user_id}, 질문: {question_id}")
+            print(f"🔑 S3 키: {s3_key}")
             
             # 기본값 설정
             if not user_id:
@@ -270,16 +255,46 @@ class EyeTrackingAnalyzer:
                 
             print(f"🚀 시선 추적 분석 시작: {user_id}/{question_id}")
             
-            # 비동기적으로 비디오 처리 (user_id, question_id 전달)
+            # 비동기적으로 비디오 처리 (안전한 예외 처리 포함)
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, self._process_video_sync_with_window, video_path, show_window, user_id, question_id
-            )
-            return result
+            try:
+                result = await loop.run_in_executor(
+                    None, self._process_video_sync_with_window, video_path, show_window, user_id, question_id
+                )
+                
+                if result is None:
+                    raise Exception("비디오 처리 결과가 None입니다")
+                    
+                return result
+                
+            except Exception as e:
+                print(f"❌ 비동기 실행 중 오류: {str(e)}")
+                # 동기 방식으로 재시도
+                try:
+                    print("🔄 동기 방식으로 재시도...")
+                    result = self._process_video_sync_with_window(video_path, False, user_id, question_id)
+                    if result is None:
+                        raise Exception("동기 처리에서도 결과가 None입니다")
+                    return result
+                except Exception as sync_error:
+                    print(f"❌ 동기 재시도도 실패: {str(sync_error)}")
+                    raise Exception(f"비동기/동기 모두 실패: {str(e)} | {str(sync_error)}")
             
         except Exception as e:
             print(f"❌ 비디오 시선 추적 분석 실패: {str(e)}")
-            raise Exception(f"비디오 시선 추적 분석 실패: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # 기본 결과 반환 (완전 실패 방지)
+            return {
+                'total_duration': 0,
+                'blink_count': 0,
+                'attention_score': 0,
+                'gaze_stability': 0,
+                'focus_score': 0,
+                'error': str(e),
+                'analysis_failed': True
+            }
     
     def _process_video_sync_with_window(self, video_path: str, show_window: bool = False, user_id: str = None, question_id: str = None) -> Dict[str, Any]:
         """시각화 옵션을 포함한 동기 비디오 처리"""
@@ -297,8 +312,36 @@ class EyeTrackingAnalyzer:
             print(f"📹 비디오 파일: {video_path}")
             print(f"👁️ 시각화 창: {'ON' if show_window else 'OFF'}")
             
-            # process_video 함수 호출 (속도 개선을 위해 frame_interval 증가)
-            result = process_video(video_path, user_id, question_id, frame_interval=6, show_window=show_window)
+            # 비디오 파일 기본 검증
+            validation_result = self.test_video_basic(video_path)
+            if "error" in validation_result:
+                print(f"❌ 비디오 파일 검증 실패: {validation_result['error']}")
+                return {
+                    'total_duration': 0,
+                    'blink_count': 0,
+                    'attention_score': 0,
+                    'gaze_stability': 0,
+                    'focus_score': 0,
+                    'error': f"비디오 파일 검증 실패: {validation_result['error']}"
+                }
+            
+            print(f"✅ 비디오 파일 검증 완료")
+            
+            # process_video 함수 호출 (안전한 예외 처리)
+            try:
+                result = process_video(video_path, user_id, question_id, frame_interval=6, show_window=show_window)
+                if result is None:
+                    raise Exception("process_video 함수가 None을 반환했습니다")
+            except Exception as e:
+                print(f"❌ process_video 실행 중 오류: {str(e)}")
+                return {
+                    'total_duration': 0,
+                    'blink_count': 0,
+                    'attention_score': 0,
+                    'gaze_stability': 0,
+                    'focus_score': 0,
+                    'error': f"비디오 처리 실패: {str(e)}"
+                }
             
             # 로그 파일에서 결과 읽기
             log_dir = Path("logs")
@@ -313,10 +356,22 @@ class EyeTrackingAnalyzer:
             print(f"  - 고개 로그: {head_log.exists()} ({head_log})")
             print(f"  - 이상 로그: {anomaly_log.exists()} ({anomaly_log})")
             
-            # 분석 결과 구성
-            analysis_result = self._build_analysis_result(
-                blink_log, gaze_log, head_log, anomaly_log, video_path, user_id, question_id
-            )
+            # 분석 결과 구성 (안전한 예외 처리)
+            try:
+                analysis_result = self._build_analysis_result(
+                    blink_log, gaze_log, head_log, anomaly_log, video_path, user_id, question_id
+                )
+            except Exception as e:
+                print(f"❌ 분석 결과 구성 중 오류: {str(e)}")
+                # 기본 결과 반환
+                analysis_result = {
+                    'total_duration': 0,
+                    'blink_count': 0,
+                    'attention_score': 0,
+                    'gaze_stability': 0,
+                    'focus_score': 0,
+                    'error': str(e)
+                }
             
             print(f"✅ 시선 추적 분석 완료!")
             print(f"📈 분석 결과 요약:")
@@ -325,16 +380,33 @@ class EyeTrackingAnalyzer:
             print(f"  - 집중도 점수: {analysis_result.get('attention_score', 0):.1f}")
             print(f"  - 시선 안정성: {analysis_result.get('gaze_stability', 0):.1f}")
             
-            # 임시 로그 파일 정리
-            for log_file in [blink_log, gaze_log, head_log, anomaly_log]:
-                if log_file.exists():
-                    log_file.unlink()
+            # 임시 로그 파일 정리 (안전한 예외 처리)
+            try:
+                for log_file in [blink_log, gaze_log, head_log, anomaly_log]:
+                    if log_file.exists():
+                        log_file.unlink()
+            except Exception as e:
+                print(f"⚠️ 로그 파일 정리 중 오류: {str(e)}")
             
             return analysis_result
             
         except Exception as e:
             print(f"❌ 비디오 처리 중 오류: {str(e)}")
-            raise Exception(f"비디오 처리 중 오류: {str(e)}")
+            # 더 자세한 오류 정보 출력
+            import traceback
+            print(f"❌ 상세 오류 정보:")
+            traceback.print_exc()
+            
+            # 기본 결과 반환 (완전 실패 방지)
+            return {
+                'total_duration': 0,
+                'blink_count': 0,
+                'attention_score': 0,
+                'gaze_stability': 0,
+                'focus_score': 0,
+                'error': str(e),
+                'processing_failed': True
+            }
     
     def _process_video_sync(self, video_path: str) -> Dict[str, Any]:
         """동기적으로 비디오를 처리합니다. (원본 main.py 로직 기반)"""
@@ -513,271 +585,398 @@ def process_video(video_path, user_id, question_id, frame_interval=3, show_windo
     frame_interval: 몇 프레임마다 처리할지 (예: 2면 2프레임마다 1번 처리)
     show_window: 시각화 창 표시 여부
     """
-    # 비디오 파일 경로 처리 (수정됨 - API용)
-    if not isinstance(video_path, Path):
-        video_path = Path(video_path)
-    
-    # 파일이 이미 존재하면 그대로 사용
-    if video_path.exists():
-        print(f"✅ 비디오 파일 확인: {video_path}")
-    elif not video_path.is_absolute():
-        # 파일이 없고 상대 경로인 경우에만 videos 디렉토리 기준으로 처리
-        video_dir = Path("videos")
-        video_dir.mkdir(exist_ok=True)
-        alternative_path = video_dir / video_path
-        if alternative_path.exists():
-            video_path = alternative_path
-            print(f"✅ videos 디렉토리에서 발견: {video_path}")
-        else:
-            print(f"⚠️ 파일을 찾을 수 없습니다. 원본 경로 시도: {video_path}")
-    
-    if not video_path.exists():
-        print(f"Error: Video file not found at {video_path}")
-        return None
-        
-    # 비디오 파일 열기
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        print(f"Error: Could not open video file {video_path}")
-        return None
-    
-    # 프레임 정보 (안전한 프레임 수 계산)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_time = frame_interval/fps if fps > 0 else frame_interval/30
-    
-    # 안전한 프레임 수 계산 - webm 파일의 음수 문제 해결
-    raw_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if raw_frame_count <= 0:
-        print("⚠️ 프레임 수를 자동으로 감지할 수 없습니다. 추정값을 사용합니다.")
-        # FPS와 예상 길이로 추정 (최대 60초)
-        total_frames = int(fps * 60) if fps > 0 else 1800
-    else:
-        total_frames = raw_frame_count
-    
-    print(f"원본 FPS: {fps}")
-    print(f"처리 FPS: {fps/frame_interval}")
-    print(f"총 프레임 수: {total_frames}")
-    print(f"프레임 간격: {frame_interval}")
-    
-    # 로그 파일 경로 설정
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    
-    # 로그 파일 경로
-    blink_log = log_dir / f"{user_id}_{question_id}.jsonl"
-    gaze_log = log_dir / f"{user_id}_{question_id}_gaze.jsonl"
-    head_log = log_dir / f"{user_id}_{question_id}_head.jsonl"
-    anomaly_log = log_dir / f"{user_id}_{question_id}_anomalies.jsonl"
-    
-    # 기존 로그 파일 삭제 (새로 시작) - 원본과 동일
-    for log_file in [blink_log, gaze_log, head_log, anomaly_log]:
-        if log_file.exists():
-            log_file.unlink()
-    
-    # 로거 초기화 (원본과 동일하게 Path 객체 전달)
-    blink_logger = BlinkLogger(blink_log)
-    gaze_logger = GazeLogger(gaze_log)
-    head_logger = HeadLogger(head_log)
-    anomaly_logger = AnomalyLogger(anomaly_log)
-    
-    # 분석기 초기화 (디버깅 로그 추가)
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    yolo_model_path = os.path.join(current_dir, 'yolov8n-face-lindevs.pt')
-    
-    print(f"📦 YOLO 모델 경로: {yolo_model_path}")
-    print(f"📦 YOLO 모델 존재 여부: {os.path.exists(yolo_model_path)}")
-    
     try:
-        face_detector = YOLOFaceDetector(yolo_model_path)
-        print("✅ YOLO 얼굴 감지기 초기화 성공")
-    except Exception as e:
-        print(f"❌ YOLO 얼굴 감지기 초기화 실패: {e}")
-        raise
+        print(f"🎬 비디오 처리 시작: {video_path}")
+        print(f"👤 사용자: {user_id}, 질문: {question_id}")
+        print(f"⚡ 프레임 간격: {frame_interval}, 시각화: {show_window}")
+        
+        # 비디오 파일 경로 처리 (수정됨 - API용)
+        if not isinstance(video_path, Path):
+            video_path = Path(video_path)
     
-    try:
-        face_analyzer = FaceMeshDetector()
-        print("✅ MediaPipe Face Mesh 초기화 성공")
-    except Exception as e:
-        print(f"❌ MediaPipe Face Mesh 초기화 실패: {e}")
-        raise
-        
-    eye_analyzer = EyeAnalyzer()
-    gaze_analyzer = GazeAnalyzer()
-    print("✅ 모든 분석기 초기화 완료")
+        # 파일이 이미 존재하면 그대로 사용
+        if video_path.exists():
+            print(f"✅ 비디오 파일 확인: {video_path}")
+        elif not video_path.is_absolute():
+            # 파일이 없고 상대 경로인 경우에만 videos 디렉토리 기준으로 처리
+            video_dir = Path("videos")
+            video_dir.mkdir(exist_ok=True)
+            alternative_path = video_dir / video_path
+            if alternative_path.exists():
+                video_path = alternative_path
+                print(f"✅ videos 디렉토리에서 발견: {video_path}")
+            else:
+                print(f"⚠️ 파일을 찾을 수 없습니다. 원본 경로 시도: {video_path}")
     
-    # 시작 시간 기록
-    start_time = time.time()
-    frame_count = 0
-    processed_count = 0
+        if not video_path.exists():
+            print(f"Error: Video file not found at {video_path}")
+            return None
+            
+        # 비디오 파일 열기 (안전한 예외 처리)
+        try:
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                print(f"Error: Could not open video file {video_path}")
+                return None
+            
+            # 비디오 파일 기본 정보 확인
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0:
+                print(f"Error: Invalid FPS value: {fps}")
+                cap.release()
+                return None
+                
+            print(f"✅ 비디오 파일 열기 성공: FPS={fps}")
+            
+        except Exception as e:
+            print(f"❌ 비디오 파일 열기 실패: {str(e)}")
+            if 'cap' in locals():
+                cap.release()
+            return None
     
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-            
-        # 프레임 스킵
-        if frame_count % frame_interval != 0:
-            frame_count += 1
-            continue
-            
-        # 현재 프레임 시간 계산
-        current_time = processed_count * frame_time
-        
-        # 속도 개선을 위한 프레임 리사이징
-        resized_frame = resize_frame_for_speed(frame, scale=0.7)
-        
-        # YOLO로 얼굴 감지 (리사이징된 프레임 사용)
-        faces = face_detector.detect_faces(resized_frame)
-        face_count = len(faces)
-        
-        # 디버깅: 첫 100프레임은 얼굴 감지 상태 출력
-        if processed_count < 100 and processed_count % 10 == 0:
-            print(f"[Frame {processed_count}] 감지된 얼굴 수: {face_count}")
-        
-        # 이상 상황 로깅
-        anomaly_logger.update_state(current_time, face_count)
-        
-        if face_count != 1:
-            frame_count += 1
-            processed_count += 1
-            continue
-            
-        # 얼굴 랜드마크 분석 (리사이징된 프레임 사용)
-        face_landmarks = face_analyzer.get_landmarks(resized_frame)
-        if face_landmarks is None:
-            if processed_count < 100 and processed_count % 10 == 0:
-                print(f"[Frame {processed_count}] MediaPipe 랜드마크 감지 실패")
-            frame_count += 1
-            processed_count += 1
-            continue
-        
-        # 디버깅: 랜드마크가 감지되면 출력
-        if processed_count < 100 and processed_count % 10 == 0:
-            print(f"[Frame {processed_count}] 랜드마크 감지 성공! 분석 시작...")
-            
-        # 시선 방향 분석 및 기록 (디버깅 로그 추가)
-        gaze_direction, eye_regions, iris_positions = gaze_analyzer.analyze_gaze(face_landmarks)
-        
-        # 디버깅: 시선 분석 결과 출력
-        if processed_count < 100 and processed_count % 10 == 0:
-            print(f"[Frame {processed_count}] 시선 방향: {gaze_direction}")
-            
-        if gaze_direction != "blink":
-            gaze_logger.update_gaze(current_time, gaze_direction)
-            # 디버깅: 시선 로깅 확인
-            if processed_count < 100 and processed_count % 10 == 0:
-                print(f"[Frame {processed_count}] 시선 로깅: {gaze_direction}")
+        # 프레임 정보 (안전한 프레임 수 계산)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_time = frame_interval/fps if fps > 0 else frame_interval/30
+    
+        # 안전한 프레임 수 계산 - webm 파일의 음수 문제 해결
+        raw_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if raw_frame_count <= 0:
+            print("⚠️ 프레임 수를 자동으로 감지할 수 없습니다. 추정값을 사용합니다.")
+            # FPS와 예상 길이로 추정 (최대 60초)
+            total_frames = int(fps * 60) if fps > 0 else 1800
         else:
-            blink_logger.log_blink(current_time)
-            # 디버깅: 깜빡임 로깅 확인
-            if processed_count < 100 and processed_count % 10 == 0:
-                print(f"[Frame {processed_count}] 깜빡임 감지!")
-            
-        # 고개 방향 분석 및 기록 (디버깅 로그 추가)
-        head_direction, is_calibrated = gaze_analyzer.analyze_head_pose(face_landmarks, current_time)
+            total_frames = raw_frame_count
         
-        # 디버깅: 고개 방향 분석 결과 출력
-        if processed_count < 100 and processed_count % 10 == 0:
-            print(f"[Frame {processed_count}] 고개 방향: {head_direction}, 보정상태: {is_calibrated}")
-            
-        if is_calibrated and head_direction != "calibrating":
-            head_logger.update_head(current_time, head_direction)
-            # 디버깅: 고개 로깅 확인
-            if processed_count < 100 and processed_count % 10 == 0:
-                print(f"[Frame {processed_count}] 고개 로깅: {head_direction}")
+        print(f"원본 FPS: {fps}")
+        print(f"처리 FPS: {fps/frame_interval}")
+        print(f"총 프레임 수: {total_frames}")
+        print(f"프레임 간격: {frame_interval}")
         
-        # 시각화 (원본과 동일하게 처리)
-        if show_window:
-            if eye_regions and iris_positions:
-                draw_status(frame, gaze_direction, head_direction, not is_calibrated)
-            cv2.imshow('Frame', frame)
+        # 로그 파일 경로 설정
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        
+        # 로그 파일 경로
+        blink_log = log_dir / f"{user_id}_{question_id}.jsonl"
+        gaze_log = log_dir / f"{user_id}_{question_id}_gaze.jsonl"
+        head_log = log_dir / f"{user_id}_{question_id}_head.jsonl"
+        anomaly_log = log_dir / f"{user_id}_{question_id}_anomalies.jsonl"
+        
+        # 기존 로그 파일 삭제 (새로 시작) - 원본과 동일
+        for log_file in [blink_log, gaze_log, head_log, anomaly_log]:
+            if log_file.exists():
+                log_file.unlink()
+        
+        # 로거 초기화 (원본과 동일하게 Path 객체 전달)
+        blink_logger = BlinkLogger(blink_log)
+        gaze_logger = GazeLogger(gaze_log)
+        head_logger = HeadLogger(head_log)
+        anomaly_logger = AnomalyLogger(anomaly_log)
+        
+        # 분석기 초기화 (디버깅 로그 추가)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        yolo_model_path = os.path.join(current_dir, 'yolov8n-face-lindevs.pt')
+        
+        print(f"📦 YOLO 모델 경로: {yolo_model_path}")
+        print(f"📦 YOLO 모델 존재 여부: {os.path.exists(yolo_model_path)}")
+        
+        try:
+            face_detector = YOLOFaceDetector(yolo_model_path)
+            print("✅ YOLO 얼굴 감지기 초기화 성공")
+        except Exception as e:
+            print(f"❌ YOLO 얼굴 감지기 초기화 실패: {e}")
+            cap.release()
+            return None
+        
+        try:
+            face_analyzer = FaceMeshDetector()
+            print("✅ MediaPipe Face Mesh 초기화 성공")
+        except Exception as e:
+            print(f"❌ MediaPipe Face Mesh 초기화 실패: {e}")
+            cap.release()
+            return None
             
-            # 'q' 키로 종료
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+        eye_analyzer = EyeAnalyzer()
+        gaze_analyzer = GazeAnalyzer()
+        print("✅ 모든 분석기 초기화 완료")
+        
+        # 시작 시간 기록
+        start_time = time.time()
+        frame_count = 0
+        processed_count = 0
+        
+        # 메인 처리 루프 (안전한 예외 처리)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("비디오 끝에 도달했습니다.")
                 break
-        
-        # 진행률 표시 (안전한 프레임 수 사용)
-        if frame_count % (frame_interval * 10) == 0 and total_frames > 0:
-            progress = (frame_count / total_frames) * 100
-            elapsed_time = time.time() - start_time
-            processing_fps = processed_count / elapsed_time if elapsed_time > 0 else 0
-            print(f"\r진행률: {progress:.1f}% ({frame_count}/{total_frames}) - 처리 속도: {processing_fps:.1f} FPS", end="")
+                
+            # 프레임 유효성 검증 강화
+            if frame is None:
+                print(f"❌ 프레임 {frame_count}: None 프레임 감지")
+                frame_count += 1
+                continue
+                
+            if frame.size == 0:
+                print(f"❌ 프레임 {frame_count}: 빈 프레임 감지")
+                frame_count += 1
+                continue
+                
+            # 프레임 차원 검증
+            if len(frame.shape) != 3 or frame.shape[2] != 3:
+                print(f"❌ 프레임 {frame_count}: 잘못된 프레임 형식 {frame.shape}")
+                frame_count += 1
+                continue
+                    
+            # 프레임 스킵
+            if frame_count % frame_interval != 0:
+                frame_count += 1
+                continue
+                    
+            # 현재 프레임 시간 계산
+            current_time = processed_count * frame_time
+                
+            # 속도 개선을 위한 프레임 리사이징
+            try:
+                resized_frame = resize_frame_for_speed(frame, scale=0.7)
+            except Exception as e:
+                print(f"❌ 프레임 리사이징 실패: {str(e)}")
+                frame_count += 1
+                processed_count += 1
+                continue
+                
+            # YOLO로 얼굴 감지 (리사이징된 프레임 사용)
+            try:
+                faces = face_detector.detect_faces(resized_frame)
+                face_count = len(faces)
+            except Exception as e:
+                print(f"❌ 얼굴 감지 실패: {str(e)}")
+                face_count = 0
+                faces = []
             
-        frame_count += 1
-        processed_count += 1
-    
-    print("\n처리 완료!")
-    print(f"총 처리 시간: {time.time() - start_time:.1f}초")
-    print(f"평균 처리 속도: {processed_count / (time.time() - start_time):.1f} FPS")
-    
-    # 정리
-    cap.release()
-    if show_window:
-        cv2.destroyAllWindows()
-    
-    # 로거 종료 (원본과 동일)
-    current_time = processed_count * frame_time
-    blink_logger.force_resolve(current_time)
-    gaze_logger.force_resolve(current_time)
-    head_logger.force_resolve(current_time)
-    anomaly_logger.force_resolve(current_time)
-    
-    # 평가 계산 실행 (원본과 동일)
-    try:
-        print("\n평가 계산을 시작합니다...")
-        
-        # 평가 모듈 임포트 시도 (원본과 동일)
-        sys.path.append(os.path.join(os.path.dirname(__file__), "calc"))
-        from total_eval_calc import calc_blink_score, calc_eye_contact_score, save_total_eval
-        from cheat_cal import detect_cheating
-        
-        # 1. 깜빡임과 아이컨택 평가 (원본과 동일)
-        blink_result = calc_blink_score(str(blink_log), user_id)
-        eye_contact_result = calc_eye_contact_score(str(gaze_log), user_id)
-        
-        # 통합 결과 저장 (S3 경로 기반 동적 설정)
-        eval_result = save_total_eval(user_id, blink_result, eye_contact_result, question_id, str(video_path))
-        print("\n[의사소통능력 및 면접태도 평가 결과]")
-        print(json.dumps(eval_result, ensure_ascii=False, indent=2))
-        
-        # 2. 부정행위 감지 (S3 경로 기반 동적 설정)
-        cheat_result = detect_cheating(str(head_log), str(anomaly_log), user_id, question_id, str(video_path))
-        print("\n[부정행위 감지 결과]")
-        print(json.dumps(cheat_result, ensure_ascii=False, indent=2))
-        
-        # 부정행위 결과 저장 (원본과 동일)
-        cheat_log = Path("src/eye_tracking/calc") / "cheating_detected.jsonl"
-        cheat_log.parent.mkdir(exist_ok=True)
-        with open(cheat_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(cheat_result, ensure_ascii=False, indent=2) + "\n\n")
+            # 디버깅: 첫 100프레임은 얼굴 감지 상태 출력
+            if processed_count < 100 and processed_count % 10 == 0:
+                print(f"[Frame {processed_count}] 감지된 얼굴 수: {face_count}")
             
-        return {
-            'blink_result': blink_result,
-            'eye_contact_result': eye_contact_result,
-            'eval_result': eval_result,
-            'cheat_result': cheat_result
-        }
+            # 이상 상황 로깅
+            try:
+                anomaly_logger.update_state(current_time, face_count)
+            except Exception as e:
+                print(f"❌ 이상상황 로깅 실패: {str(e)}")
+            
+            if face_count != 1:
+                frame_count += 1
+                processed_count += 1
+                continue
+                
+            # 얼굴 랜드마크 분석 (리사이징된 프레임 사용)
+            try:
+                face_landmarks = face_analyzer.get_landmarks(resized_frame)
+                if face_landmarks is None:
+                    if processed_count < 100 and processed_count % 10 == 0:
+                        print(f"[Frame {processed_count}] MediaPipe 랜드마크 감지 실패")
+                    frame_count += 1
+                    processed_count += 1
+                    continue
+            except Exception as e:
+                print(f"❌ MediaPipe 랜드마크 감지 오류: {str(e)}")
+                frame_count += 1
+                processed_count += 1
+                continue
+            
+            # 디버깅: 랜드마크가 감지되면 출력
+            if processed_count < 100 and processed_count % 10 == 0:
+                print(f"[Frame {processed_count}] 랜드마크 감지 성공! 분석 시작...")
+                
+            # 시선 방향 분석 및 기록 (안전한 예외 처리)
+            try:
+                # 시선 분석을 위한 변수 초기화
+                gaze_direction = "unknown"
+                eye_regions = None
+                iris_positions = None
+                
+                # 실제 분석 수행
+                gaze_direction, eye_regions, iris_positions = gaze_analyzer.analyze_gaze(face_landmarks)
+                
+                # 디버깅: 시선 분석 결과 출력
+                if processed_count < 100 and processed_count % 10 == 0:
+                    print(f"[Frame {processed_count}] 시선 방향: {gaze_direction}")
+                    
+                if gaze_direction != "blink":
+                    gaze_logger.update_gaze(current_time, gaze_direction)
+                    # 디버깅: 시선 로깅 확인
+                    if processed_count < 100 and processed_count % 10 == 0:
+                        print(f"[Frame {processed_count}] 시선 로깅: {gaze_direction}")
+                else:
+                    blink_logger.log_blink(current_time)
+                    # 디버깅: 깜빡임 로깅 확인
+                    if processed_count < 100 and processed_count % 10 == 0:
+                        print(f"[Frame {processed_count}] 깜빡임 감지!")
+            except Exception as e:
+                print(f"❌ 시선 분석 실패: {str(e)}")
+                # 기본값 설정
+                gaze_direction = "unknown"
+                eye_regions = None
+                iris_positions = None
+                
+            # 고개 방향 분석 및 기록 (안전한 예외 처리)
+            try:
+                # 고개 방향 분석을 위한 변수 초기화
+                head_direction = "unknown"
+                is_calibrated = False
+                
+                # 실제 분석 수행
+                head_direction, is_calibrated = gaze_analyzer.analyze_head_pose(face_landmarks, current_time)
+                
+                # 디버깅: 고개 방향 분석 결과 출력
+                if processed_count < 100 and processed_count % 10 == 0:
+                    print(f"[Frame {processed_count}] 고개 방향: {head_direction}, 보정상태: {is_calibrated}")
+                    
+                if is_calibrated and head_direction != "calibrating":
+                    head_logger.update_head(current_time, head_direction)
+                    # 디버깅: 고개 로깅 확인
+                    if processed_count < 100 and processed_count % 10 == 0:
+                        print(f"[Frame {processed_count}] 고개 로깅: {head_direction}")
+            except Exception as e:
+                print(f"❌ 고개 방향 분석 실패: {str(e)}")
+                # 기본값 설정
+                head_direction = "unknown"
+                is_calibrated = False
+            
+            # 시각화 (안전한 처리)
+            try:
+                if show_window:
+                    # 프레임 유효성 검증
+                    if frame is not None and frame.size > 0:
+                        # 변수 존재 확인
+                        if 'eye_regions' in locals() and 'iris_positions' in locals() and eye_regions and iris_positions:
+                            # draw_status 함수 안전 호출
+                            try:
+                                draw_status(frame, gaze_direction, head_direction, not is_calibrated)
+                            except Exception as draw_e:
+                                print(f"❌ draw_status 실패: {str(draw_e)}")
+                        
+                        # OpenCV GUI 안전 호출
+                        try:
+                            cv2.imshow('Frame', frame)
+                            key = cv2.waitKey(1) & 0xFF
+                            if key == ord('q'):
+                                break
+                        except Exception as cv_e:
+                            print(f"❌ OpenCV GUI 실패: {str(cv_e)}")
+                            # GUI 오류 시 show_window 비활성화
+                            show_window = False
+                    else:
+                        # 프레임이 유효하지 않아도 시각화만 건너뛰고 계속 진행
+                        print(f"⚠️ 프레임 {frame_count}: 시각화 건너뛰기 (프레임 무효)")
+                        
+            except Exception as e:
+                print(f"❌ 시각화 처리 실패: {str(e)}")
+                # 시각화 오류 시 GUI 비활성화
+                show_window = False
+            
+            # 진행률 표시 (안전한 프레임 수 사용)
+            try:
+                if frame_count % (frame_interval * 10) == 0 and total_frames > 0:
+                    progress = (frame_count / total_frames) * 100
+                    elapsed_time = time.time() - start_time
+                    processing_fps = processed_count / elapsed_time if elapsed_time > 0 else 0
+                    print(f"\r진행률: {progress:.1f}% ({frame_count}/{total_frames}) - 처리 속도: {processing_fps:.1f} FPS", end="")
+            except Exception as e:
+                print(f"❌ 진행률 표시 실패: {str(e)}")
+                
+            frame_count += 1
+            processed_count += 1
         
-    except ImportError as e:
-        print(f"\n평가 모듈을 찾을 수 없습니다: {e}")
-        print("로그 파일만 생성되었습니다.")
+        print("\n처리 완료!")
+        print(f"총 처리 시간: {time.time() - start_time:.1f}초")
+        print(f"평균 처리 속도: {processed_count / (time.time() - start_time):.1f} FPS")
         
-        # 기본 점수 계산으로 대체
-        duration = processed_count * frame_time
-        basic_scores = calculate_basic_scores(blink_log, gaze_log, head_log, anomaly_log, duration)
+        # 정리
+        cap.release()
+        if show_window:
+            cv2.destroyAllWindows()
         
-        print(f"\n📊 기본 점수 계산 결과:")
-        print(f"  - 집중도: {basic_scores['concentration_score']}")
-        print(f"  - 안정성: {basic_scores['stability_score']}")
-        print(f"  - 깜빡임: {basic_scores['blink_score']}")
+        # 로거 종료 (원본과 동일)
+        current_time = processed_count * frame_time
+        blink_logger.force_resolve(current_time)
+        gaze_logger.force_resolve(current_time)
+        head_logger.force_resolve(current_time)
+        anomaly_logger.force_resolve(current_time)
         
-        return {
-            'basic_scores': basic_scores,
-            'duration': duration,
-            'log_files_created': True
-        }
+        # 평가 계산 실행 (원본과 동일)
+        try:
+            print("\n평가 계산을 시작합니다...")
+            
+            # 평가 모듈 임포트 시도 (원본과 동일)
+            sys.path.append(os.path.join(os.path.dirname(__file__), "calc"))
+            from total_eval_calc import calc_blink_score, calc_eye_contact_score, save_total_eval
+            from cheat_cal import detect_cheating
+            
+            # 1. 깜빡임과 아이컨택 평가 (원본과 동일)
+            blink_result = calc_blink_score(str(blink_log), user_id)
+            eye_contact_result = calc_eye_contact_score(str(gaze_log), user_id)
+            
+            # 통합 결과 저장 (S3 경로 기반 동적 설정)
+            eval_result = save_total_eval(user_id, blink_result, eye_contact_result, question_id, str(video_path))
+            print("\n[의사소통능력 및 면접태도 평가 결과]")
+            print(json.dumps(eval_result, ensure_ascii=False, indent=2))
+            
+            # 2. 부정행위 감지 (S3 경로 기반 동적 설정)
+            cheat_result = detect_cheating(str(head_log), str(anomaly_log), user_id, question_id, str(video_path))
+            print("\n[부정행위 감지 결과]")
+            print(json.dumps(cheat_result, ensure_ascii=False, indent=2))
+            
+            # 부정행위 결과 저장 (원본과 동일)
+            cheat_log = Path("src/eye_tracking/calc") / "cheating_detected.jsonl"
+            cheat_log.parent.mkdir(exist_ok=True)
+            with open(cheat_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(cheat_result, ensure_ascii=False, indent=2) + "\n\n")
+                
+            return {
+                'blink_result': blink_result,
+                'eye_contact_result': eye_contact_result,
+                'eval_result': eval_result,
+                'cheat_result': cheat_result
+            }
+            
+        except ImportError as e:
+            print(f"\n평가 모듈을 찾을 수 없습니다: {e}")
+            print("로그 파일만 생성되었습니다.")
+            
+            # 기본 점수 계산으로 대체
+            duration = processed_count * frame_time
+            basic_scores = calculate_basic_scores(blink_log, gaze_log, head_log, anomaly_log, duration)
+            
+            print(f"\n📊 기본 점수 계산 결과:")
+            print(f"  - 집중도: {basic_scores['concentration_score']}")
+            print(f"  - 안정성: {basic_scores['stability_score']}")
+            print(f"  - 깜빡임: {basic_scores['blink_score']}")
+            
+            return {
+                'basic_scores': basic_scores,
+                'duration': duration,
+                'log_files_created': True
+            }
+        except Exception as e:
+            print(f"\n평가 계산 중 오류 발생: {e}")
+            return None
+
     except Exception as e:
-        print(f"\n평가 계산 중 오류 발생: {e}")
+        print(f"❌ 비디오 처리 중 치명적 오류: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        # 리소스 정리
+        try:
+            if 'cap' in locals():
+                cap.release()
+            if show_window:
+                cv2.destroyAllWindows()
+        except:
+            pass
+        
         return None
 
 def main():

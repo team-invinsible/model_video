@@ -34,7 +34,7 @@ class MariaDBHandler:
         self.port = int(os.getenv("MARIADB_PORT", "3306"))
         self.user = os.getenv("MARIADB_USER", "root")
         self.password = os.getenv("MARIADB_PASSWORD", "")
-        self.database = os.getenv("MARIADB_DATABASE", "audio")
+        self.database = os.getenv("MARIADB_DATABASE", "SKAI")
         
     async def create_pool(self):
         """MariaDB 연결 풀 생성"""
