@@ -92,7 +92,7 @@ class AnalysisResponse(BaseModel):
     analysis_id: str
     status: str
     message: str
-    result: Optional[Dict[str, Any]] = None
+    results: Optional[Dict[str, Any]] = None
 
 # 전역 인스턴스
 s3_handler = S3Handler()
@@ -103,9 +103,9 @@ gpt_analyzer = GPTAnalyzer()
 
 # --- 영상 수신 API 엔드포인트 ---
 @app.post("/analysis/attitude", response_model=AnalysisResponse)
-async def analyze_video_from_s3_key(payload: AnalysisPayload):
+async def analyze_video_from_s3_key(payload: AnalysisPayload, background_tasks: BackgroundTasks):
     """
-    메인 서버로부터 S3 Object Key를 받아 영상 분석을 완료한 후 결과를 응답합니다.
+    메인 서버로부터 S3 Object Key를 받아 영상 분석을 시작합니다.
     """
     try:
         s3_key = payload.s3ObjectKey
@@ -113,26 +113,15 @@ async def analyze_video_from_s3_key(payload: AnalysisPayload):
         
         # S3 키로부터 사용자 ID와 질문 번호 추출
         try:
-            # 실제 S3 키 형식: skala25a/team12/interview_video/{userId}/{question_num}/*.webm
+            # 예: 'iv001/Q001/video.mp4' -> ('iv001', 'Q001')
             parts = s3_key.split('/')
-            print(f"🔍 S3 키 분할: {parts}")
-            
-            # interview_video 다음에 오는 경로에서 user_id와 question_num 추출
-            if 'interview_video' in parts:
-                video_index = parts.index('interview_video')
-                if video_index + 2 < len(parts):
-                    user_id = parts[video_index + 1]
-                    question_num = parts[video_index + 2]
-                    print(f"🔍 파싱 성공: user_id={user_id}, question_num={question_num}")
-                else:
-                    raise IndexError("interview_video 다음에 user_id와 question_num이 없습니다.")
-            else:
-                raise IndexError("S3 키에 'interview_video' 경로가 없습니다.")
-                
-        except (IndexError, ValueError) as e:
+            if len(parts) < 2:
+                raise IndexError("S3 key does not contain user_id and question_num.")
+            user_id, question_num = parts[0], parts[1]
+        except IndexError:
             raise HTTPException(
                 status_code=400,
-                detail=f"잘못된 S3 키 형식입니다. 'skala25a/team12/interview_video/{{user_id}}/{{question_num}}/...' 형식을 기대합니다: {s3_key}"
+                detail=f"잘못된 S3 키 형식입니다. 'user_id/question_num/...' 형식을 기대합니다: {s3_key}"
             )
             
         analysis_id = f"api_s3_analysis_{user_id}_{question_num}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -141,32 +130,22 @@ async def analyze_video_from_s3_key(payload: AnalysisPayload):
 
         print(f"🎬 API 요청 기반 분석 시작: {user_id}/{question_num} -> {s3_key}")
         
-        # 모든 분석 작업을 비동기로 실행하고 완료까지 대기
-        analysis_result = await process_s3_user_video_analysis(
-            analysis_id=analysis_id,
-            s3_bucket=bucket_name,
-            s3_key=s3_key,
-            user_id=user_id,
-            question_num=question_num,
-            session_id=None
+        # 백그라운드에서 분석 실행 (기존 로직 재활용)
+        background_tasks.add_task(
+            process_s3_user_video_analysis,
+            analysis_id,
+            bucket_name,
+            s3_key,
+            user_id,
+            question_num,
+            session_id
         )
         
-        # 분석 결과 확인
-        if analysis_result and "error" not in analysis_result:
-            return AnalysisResponse(
-                analysis_id=analysis_id,
-                status="completed",
-                message=f"사용자 {user_id}, 질문 {question_num} 영상 분석이 성공적으로 완료되었습니다.",
-                result=analysis_result
-            )
-        else:
-            error_msg = analysis_result.get("error", "알 수 없는 오류") if analysis_result else "분석 결과가 없습니다"
-            return AnalysisResponse(
-                analysis_id=analysis_id,
-                status="failed",
-                message=f"영상 분석 실패: {error_msg}",
-                result=analysis_result
-            )
+        return AnalysisResponse(
+            analysis_id=analysis_id,
+            status="processing",
+            message=f"사용자 {user_id}, 질문 {question_num} 영상에 대한 분석 요청을 수신했으며, 백그라운드 처리를 시작합니다."
+        )
 
     except HTTPException as http_exc:
         raise http_exc
@@ -793,7 +772,7 @@ async def process_s3_user_video_analysis(
     session_id: Optional[str]
 ):
     """
-    S3 사용자별 영상 분석 워크플로우를 처리합니다. (기존 비동기 버전)
+    S3 사용자별 영상 분석 워크플로우를 처리합니다.
     """
     temp_dir = None
     start_time = datetime.now()
@@ -823,7 +802,7 @@ async def process_s3_user_video_analysis(
         
         # 4. 시선 추적 분석 실행
         stage_start = datetime.now()
-        eye_tracking_result = await eye_tracking_analyzer.analyze_video(processed_video_path, s3_key)
+        eye_tracking_result = await eye_tracking_analyzer.analyze_video(processed_video_path)
         processing_times["eye_tracking"] = (datetime.now() - stage_start).total_seconds()
         
         await update_analysis_status(analysis_id, "processing", "llm_analysis", 80.0)
@@ -866,14 +845,6 @@ async def process_s3_user_video_analysis(
         
         # 최종 완료 상태 업데이트
         await update_analysis_status(analysis_id, "completed", None, 100.0)
-        
-        # GPT 배치 분석 큐에 추가 (MariaDB 저장을 위해)
-        await add_to_gpt_batch_queue(analysis_id, user_id, question_num)
-        print(f"📝 GPT 분석 큐에 추가됨: {analysis_id}")
-        
-        # 즉시 GPT 배치 처리 트리거 (백그라운드에서 실행)
-        asyncio.create_task(process_gpt_batch())
-        print(f"🚀 GPT 배치 처리 즉시 트리거됨")
         
         print(f"분석 완료: {analysis_id}")
         
@@ -1073,4 +1044,4 @@ async def check_and_trigger_gpt_batch():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8002) 
