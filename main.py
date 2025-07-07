@@ -8,6 +8,7 @@
 # 2025-06-16 | 구조 개선 | DB 저장, S3 연동, LLM 연동 구조 최적화 | 이재인
 # 2025-06-16 | 자동 분석 | 서버 시작 시 S3 모든 영상 자동 분석 기능 추가 | 이재인
 # 2025-06-17 | 기능 최적화 | 자동 분석 기능만 남기고 수동 업로드 관련 기능 삭제 | 이재인
+# 2025-01-27 | 응답 최적화 | 분석 완료 후 DB 저장까지 완료된 상태에서 응답 반환하도록 수정 | 구동빈
 # ----
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -35,8 +36,8 @@ from src.utils.s3_handler import S3Handler
 from src.utils.file_utils import FileProcessor
 from src.emotion.analyzer import EmotionAnalyzer
 from src.eye_tracking.analyzer import EyeTrackingAnalyzer
-from src.db.database import get_db_session
-from src.db.crud import save_analysis_result, get_analysis_results
+from src.db.database import get_db_session, setup_database
+from src.db.crud import safe_save_analysis_result, safe_get_analysis_results, get_analysis_results_by_user, get_recent_analysis_results, get_analysis_statistics
 from src.llm.gpt_analyzer import GPTAnalyzer
 from src.db.mariadb_handler import mariadb_handler
 
@@ -58,19 +59,28 @@ _batch_processing_active = False  # 배치 처리 활성화 상태
 @app.on_event("startup")
 async def startup_event():
     """애플리케이션 시작 시 실행되는 이벤트"""
+    print("🚀 분석 서버를 시작합니다...")
+    
+    # MongoDB 연결 시도 (실패해도 계속 진행)
     try:
-        # MariaDB 연결 풀 생성
+        setup_database()
+        print("✅ MongoDB 연결이 활성화되었습니다.")
+    except Exception as e:
+        print(f"⚠️ MongoDB 연결 실패 - 애플리케이션은 MongoDB 없이 계속 실행됩니다: {e}")
+    
+    # MariaDB 연결 시도
+    try:
         await mariadb_handler.create_pool()
         print("✅ MariaDB 연결이 활성화되었습니다.")
-        print("🚀 분석 서버가 성공적으로 시작되었습니다. API 요청을 대기합니다.")
-        
-        # ⚠️ S3 자동 분석 로직 제거
-        # print("📡 S3 자동 분석을 시작합니다...")
-        # asyncio.create_task(auto_analyze_all_s3_videos())
-        
     except Exception as e:
-        print(f"⚠️ 애플리케이션 시작 중 오류 발생: {e}")
-        print("📍 MariaDB 연결 실패 - MongoDB만 사용합니다.")
+        print(f"⚠️ MariaDB 연결 실패: {e}")
+        print("📍 MariaDB 없이 계속 실행됩니다.")
+    
+    print("🚀 분석 서버가 시작되었습니다. API 요청을 대기합니다.")
+    
+    # ⚠️ S3 자동 분석 로직 제거
+    # print("📡 S3 자동 분석을 시작합니다...")
+    # asyncio.create_task(auto_analyze_all_s3_videos())
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -103,55 +113,73 @@ gpt_analyzer = GPTAnalyzer()
 
 # --- 영상 수신 API 엔드포인트 ---
 @app.post("/analysis/attitude", response_model=AnalysisResponse)
-async def analyze_video_from_s3_key(payload: AnalysisPayload, background_tasks: BackgroundTasks):
+async def analyze_video_from_s3_key(payload: AnalysisPayload):
     """
-    메인 서버로부터 S3 Object Key를 받아 영상 분석을 시작합니다.
+    메인 서버로부터 S3 Object Key를 받아 영상 분석을 완료한 후 응답을 반환합니다.
+    모든 분석 작업과 DB 저장이 완료된 후 응답을 반환합니다.
     """
     try:
         s3_key = payload.s3ObjectKey
-        print(f"Received analysis request for s3ObjectKey: {s3_key}")
+        print(f"📥 분석 요청 수신: {s3_key}")
         
         # S3 키로부터 사용자 ID와 질문 번호 추출
         try:
-            # 예: 'iv001/Q001/video.mp4' -> ('iv001', 'Q001')
+            # 예: 'team12/interview_video/7/1/1번.webm' -> user_id='7', question_num='1'
             parts = s3_key.split('/')
-            if len(parts) < 2:
-                raise IndexError("S3 key does not contain user_id and question_num.")
-            user_id, question_num = parts[0], parts[1]
+            print(f"🔍 S3 키 파싱: {s3_key} -> parts: {parts}")
+            
+            if len(parts) < 4:
+                raise IndexError("S3 key does not contain enough parts for team/folder/user_id/question_num structure.")
+            
+            # team12/interview_video/7/1/1번.webm 구조에서 추출
+            user_id = parts[2]  # 세 번째 부분이 지원자 번호
+            question_num = parts[3]  # 네 번째 부분이 질문 번호
+            
+            print(f"✅ 파싱 결과: user_id='{user_id}', question_num='{question_num}'")
+            
         except IndexError:
             raise HTTPException(
                 status_code=400,
-                detail=f"잘못된 S3 키 형식입니다. 'user_id/question_num/...' 형식을 기대합니다: {s3_key}"
+                detail=f"잘못된 S3 키 형식입니다. 'team/interview_video/user_id/question_num/...' 형식을 기대합니다: {s3_key}"
             )
             
         analysis_id = f"api_s3_analysis_{user_id}_{question_num}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         bucket_name = os.getenv('S3_BUCKET_NAME', 'skala25a')
         session_id = f"api_triggered_{user_id}"
 
-        print(f"🎬 API 요청 기반 분석 시작: {user_id}/{question_num} -> {s3_key}")
+        print(f"🎬 분석 시작: {user_id}/{question_num} -> {s3_key}")
         
-        # 백그라운드에서 분석 실행 (기존 로직 재활용)
-        background_tasks.add_task(
-            process_s3_user_video_analysis,
+        # 동기적으로 분석 실행 (모든 작업 완료 후 응답 반환)
+        analysis_results = await process_s3_user_video_analysis(
             analysis_id,
             bucket_name,
             s3_key,
             user_id,
             question_num,
-            session_id
+            session_id,
+            return_result=True
         )
         
-        return AnalysisResponse(
-            analysis_id=analysis_id,
-            status="processing",
-            message=f"사용자 {user_id}, 질문 {question_num} 영상에 대한 분석 요청을 수신했으며, 백그라운드 처리를 시작합니다."
-        )
+        if analysis_results["status"] == "completed":
+            return AnalysisResponse(
+                analysis_id=analysis_id,
+                status="completed",
+                message=f"사용자 {user_id}, 질문 {question_num} 영상 분석이 완료되었습니다.",
+                results=analysis_results["results"]
+            )
+        else:
+            return AnalysisResponse(
+                analysis_id=analysis_id,
+                status="error",
+                message=f"분석 중 오류가 발생했습니다: {analysis_results.get('error', 'Unknown error')}",
+                results=None
+            )
 
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         # 예상치 못한 에러에 대한 로깅 강화
-        print(f"🔥 /analyze 엔드포인트에서 심각한 오류 발생: {str(e)}")
+        print(f"🔥 /analysis/attitude 엔드포인트에서 심각한 오류 발생: {str(e)}")
         raise HTTPException(status_code=500, detail=f"분석 요청 처리 중 서버 오류 발생: {str(e)}")
 
 @app.get("/")
@@ -235,7 +263,8 @@ async def analyze_s3_user_video(request: S3UserVideoRequest, background_tasks: B
             video_key,
             request.user_id,
             request.question_num,
-            request.session_id or "manual"
+            request.session_id or "manual",
+            return_result=False
         )
         
         return AnalysisResponse(
@@ -253,18 +282,12 @@ async def get_analysis_result(analysis_id: str):
     분석 결과를 조회합니다.
     """
     try:
-        with get_db_session() as db:
-            collection = db['analysis_results']
-            result = collection.find_one({"analysis_id": analysis_id})
-            
-            if not result:
-                raise HTTPException(status_code=404, detail="분석 결과를 찾을 수 없습니다.")
-            
-            # ObjectId를 문자열로 변환
-            if '_id' in result:
-                result['_id'] = str(result['_id'])
-            
+        result = safe_get_analysis_results(analysis_id)
+        
+        if result:
             return result
+        else:
+            raise HTTPException(status_code=404, detail="분석 결과를 찾을 수 없습니다.")
             
     except HTTPException:
         raise
@@ -278,6 +301,9 @@ async def get_llm_comment(analysis_id: str):
     """
     try:
         with get_db_session() as db:
+            if db is None:
+                return {"message": "MongoDB 연결 없음 - LLM 코멘트 조회 불가"}
+            
             collection = db['llm_comments']
             comment = collection.find_one({"analysis_id": analysis_id})
             
@@ -291,7 +317,7 @@ async def get_llm_comment(analysis_id: str):
             return comment
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LLM 코멘트 조회 중 오류 발생: {str(e)}")
+        return {"message": f"LLM 코멘트 조회 실패 (스킵됨): {str(e)}"}
 
 @app.get("/analysis/recent")
 async def get_recent_analyses(limit: int = 10):
@@ -299,20 +325,11 @@ async def get_recent_analyses(limit: int = 10):
     최근 분석 결과들을 조회합니다.
     """
     try:
-        with get_db_session() as db:
-            collection = db['analysis_results']
-            
-            results = []
-            for doc in collection.find().sort("created_at", -1).limit(limit):
-                # ObjectId를 문자열로 변환
-                if '_id' in doc:
-                    doc['_id'] = str(doc['_id'])
-                results.append(doc)
-            
-            return {"recent_analyses": results, "count": len(results)}
-            
+        results = get_recent_analysis_results(limit)
+        return {"recent_analyses": results, "count": len(results)}
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"최근 분석 조회 중 오류 발생: {str(e)}")
+        return {"recent_analyses": [], "count": 0, "message": f"최근 분석 조회 실패 (스킵됨): {str(e)}"}
 
 @app.get("/analysis/{analysis_id}/status")
 async def get_analysis_status(analysis_id: str):
@@ -320,21 +337,21 @@ async def get_analysis_status(analysis_id: str):
     분석 진행 상태를 조회합니다.
     """
     try:
-        with get_db_session() as db:
-            collection = db['analysis_results']
-            result = collection.find_one(
-                {"analysis_id": analysis_id},
-                {"analysis_id": 1, "status": 1, "progress": 1, "stage": 1, "created_at": 1, "completed_at": 1}
-            )
-            
-            if not result:
-                raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
-            
-            # ObjectId를 문자열로 변환
-            if '_id' in result:
-                result['_id'] = str(result['_id'])
-            
-            return result
+        result = safe_get_analysis_results(analysis_id)
+        
+        if result:
+            # 필요한 필드만 추출
+            status_info = {
+                "analysis_id": result.get("analysis_id"),
+                "status": result.get("status"),
+                "progress": result.get("progress", 0),
+                "stage": result.get("stage"),
+                "created_at": result.get("created_at"),
+                "completed_at": result.get("completed_at")
+            }
+            return status_info
+        else:
+            raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
             
     except HTTPException:
         raise
@@ -348,6 +365,9 @@ async def cancel_analysis(analysis_id: str):
     """
     try:
         with get_db_session() as db:
+            if db is None:
+                return {"message": "MongoDB 연결 없음 - 분석 취소 불가", "analysis_id": analysis_id}
+            
             collection = db['analysis_results']
             result = collection.update_one(
                 {"analysis_id": analysis_id, "status": "processing"},
@@ -362,7 +382,7 @@ async def cancel_analysis(analysis_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"분석 취소 중 오류 발생: {str(e)}")
+        return {"message": f"분석 취소 실패 (스킵됨): {str(e)}", "analysis_id": analysis_id}
 
 @app.get("/interview-attitude/{user_id}")
 async def get_interview_attitude_by_user(user_id: str):
@@ -415,7 +435,10 @@ async def health_check():
         mongodb_status = "healthy"
         try:
             with get_db_session() as db:
-                db.list_collection_names()
+                if db is not None:
+                    db.list_collection_names()
+                else:
+                    mongodb_status = "disconnected"
         except Exception as e:
             mongodb_status = f"error: {str(e)}"
         
@@ -636,53 +659,60 @@ async def get_auto_analysis_status():
     자동 분석 진행 상황을 조회합니다.
     """
     try:
-        with get_db_session() as db:
-            collection = db['analysis_results']
-            
-            # 전체 분석 결과 통계
-            total_analyses = collection.count_documents({})
-            completed_analyses = collection.count_documents({"status": "completed"})
-            processing_analyses = collection.count_documents({"status": "processing"})
-            failed_analyses = collection.count_documents({"status": "error"})
-            
-            # 자동 분석 결과 (session_id가 "auto_batch"인 것들)
-            auto_analyses = collection.count_documents({"session_id": "auto_batch"})
-            auto_completed = collection.count_documents({
-                "session_id": "auto_batch", 
-                "status": "completed"
+        # MongoDB 통계 조회 (연결 실패 시 기본값 반환)
+        statistics = get_analysis_statistics()
+        recent_analyses = get_recent_analysis_results(10)
+        
+        # 최근 분석 결과 형태 변환
+        formatted_recent = []
+        for doc in recent_analyses:
+            formatted_recent.append({
+                "analysis_id": doc.get("analysis_id"),
+                "user_id": doc.get("user_id"),
+                "question_num": doc.get("question_num"),
+                "status": doc.get("status"),
+                "created_at": doc.get("created_at"),
+                "session_id": doc.get("session_id")
             })
-            
-            # 최근 분석 결과 (최근 10개)
-            recent_analyses = []
-            for doc in collection.find().sort("created_at", -1).limit(10):
-                recent_analyses.append({
-                    "analysis_id": doc.get("analysis_id"),
-                    "user_id": doc.get("user_id"),
-                    "question_num": doc.get("question_num"),
-                    "status": doc.get("status"),
-                    "created_at": doc.get("created_at"),
-                    "session_id": doc.get("session_id")
-                })
-            
-            return {
-                "timestamp": datetime.now().isoformat(),
-                "total_statistics": {
-                    "total_analyses": total_analyses,
-                    "completed": completed_analyses,
-                    "processing": processing_analyses,
-                    "failed": failed_analyses,
-                    "completion_rate": round(completed_analyses / total_analyses * 100, 1) if total_analyses > 0 else 0
-                },
-                "auto_batch_statistics": {
-                    "total_auto_analyses": auto_analyses,
-                    "auto_completed": auto_completed,
-                    "auto_completion_rate": round(auto_completed / auto_analyses * 100, 1) if auto_analyses > 0 else 0
-                },
-                "recent_analyses": recent_analyses
-            }
-            
+        
+        # 기본 응답
+        response = {
+            "timestamp": datetime.now().isoformat(),
+            "total_statistics": {
+                "total_analyses": statistics.get("total_analyses", 0),
+                "completed": statistics.get("status_breakdown", {}).get("completed", 0),
+                "processing": statistics.get("status_breakdown", {}).get("processing", 0),
+                "failed": statistics.get("status_breakdown", {}).get("error", 0),
+                "completion_rate": 0
+            },
+            "recent_analyses": formatted_recent
+        }
+        
+        # 완료율 계산
+        total = response["total_statistics"]["total_analyses"]
+        completed = response["total_statistics"]["completed"]
+        if total > 0:
+            response["total_statistics"]["completion_rate"] = round(completed / total * 100, 1)
+        
+        # MongoDB 연결 상태 정보 추가
+        if "note" in statistics:
+            response["note"] = statistics["note"]
+        
+        return response
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"자동 분석 상태 조회 중 오류 발생: {str(e)}")
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": f"자동 분석 상태 조회 실패: {str(e)}",
+            "total_statistics": {
+                "total_analyses": 0,
+                "completed": 0,
+                "processing": 0,
+                "failed": 0,
+                "completion_rate": 0
+            },
+            "recent_analyses": []
+        }
 
 @app.post("/auto-analysis/restart")
 async def restart_auto_analysis():
@@ -769,55 +799,91 @@ async def process_s3_user_video_analysis(
     s3_key: str,
     user_id: str,
     question_num: str,
-    session_id: Optional[str]
+    session_id: Optional[str],
+    return_result: bool = False
 ):
     """
     S3 사용자별 영상 분석 워크플로우를 처리합니다.
+    
+    Args:
+        return_result: True면 결과를 반환하고 상세 로그 출력 (동기 모드)
+                      False면 백그라운드 처리 모드 (기본값)
     """
     temp_dir = None
     start_time = datetime.now()
     processing_times = {}
     
     try:
-        # 분석 상태를 PROCESSING으로 업데이트
-        await update_analysis_status(analysis_id, "processing", "download", 10.0)
+        if return_result:
+            print(f"📊 분석 시작: {analysis_id}")
+        else:
+            # 분석 상태를 PROCESSING으로 업데이트 (백그라운드 모드만)
+            await update_analysis_status(analysis_id, "processing", "download", 10.0)
         
         # 1. 임시 디렉토리 생성 및 S3 다운로드
         stage_start = datetime.now()
+        if return_result:
+            print(f"📥 S3에서 영상 다운로드 중... ({s3_key})")
         temp_dir = tempfile.mkdtemp(prefix="video_analysis_")
         video_path = await s3_handler.download_file(s3_bucket, s3_key, temp_dir)
         processing_times["download"] = (datetime.now() - stage_start).total_seconds()
+        if return_result:
+            print(f"✅ 다운로드 완료 ({processing_times['download']:.2f}초)")
         
-        await update_analysis_status(analysis_id, "processing", "emotion_analysis", 30.0)
+        if not return_result:
+            await update_analysis_status(analysis_id, "processing", "emotion_analysis", 30.0)
         
         # 2. 영상/음성 분리 (필요시)
+        if return_result:
+            print(f"🎬 영상 전처리 중...")
         processed_video_path = await file_processor.process_video(video_path)
         
         # 3. 감정 분석 실행
         stage_start = datetime.now()
+        if return_result:
+            print(f"😊 감정 분석 실행 중...")
         emotion_result = await emotion_analyzer.analyze_video(processed_video_path)
         processing_times["emotion_analysis"] = (datetime.now() - stage_start).total_seconds()
+        if return_result:
+            print(f"✅ 감정 분석 완료 ({processing_times['emotion_analysis']:.2f}초) - 점수: {emotion_result.get('interview_score', 0)}")
         
-        await update_analysis_status(analysis_id, "processing", "eye_tracking", 60.0)
+        if not return_result:
+            await update_analysis_status(analysis_id, "processing", "eye_tracking", 60.0)
         
         # 4. 시선 추적 분석 실행
         stage_start = datetime.now()
+        if return_result:
+            print(f"👁️ 시선 추적 분석 실행 중...")
         eye_tracking_result = await eye_tracking_analyzer.analyze_video(processed_video_path)
         processing_times["eye_tracking"] = (datetime.now() - stage_start).total_seconds()
+        if return_result:
+            print(f"✅ 시선 추적 분석 완료 ({processing_times['eye_tracking']:.2f}초) - 점수: {eye_tracking_result.get('basic_scores', {}).get('total_eye_score', 0)}")
         
-        await update_analysis_status(analysis_id, "processing", "llm_analysis", 80.0)
+        if not return_result:
+            await update_analysis_status(analysis_id, "processing", "llm_analysis", 80.0)
         
         # 5. LLM으로 종합 분석 및 코멘트 생성
         stage_start = datetime.now()
-        llm_comment = await gpt_analyzer.generate_comment(
-            emotion_result, eye_tracking_result, analysis_id
-        )
+        if return_result:
+            print(f"🤖 LLM 분석 실행 중...")
+            llm_comment = await gpt_analyzer.analyze_interview_results(
+                emotion_result, eye_tracking_result, user_id, question_num
+            )
+        else:
+            llm_comment = await gpt_analyzer.generate_comment(
+                emotion_result, eye_tracking_result, analysis_id
+            )
         processing_times["llm_analysis"] = (datetime.now() - stage_start).total_seconds()
+        if return_result:
+            print(f"✅ LLM 분석 완료 ({processing_times['llm_analysis']:.2f}초)")
         
-        await update_analysis_status(analysis_id, "processing", "save_results", 95.0)
+        if not return_result:
+            await update_analysis_status(analysis_id, "processing", "save_results", 95.0)
         
-        # 6. 결과를 MongoDB에 저장 (처리 시간 포함)
+        # 6. 결과를 MongoDB에 저장
         stage_start = datetime.now()
+        if return_result:
+            print(f"💾 MongoDB에 분석 결과 저장 중...")
         total_processing_time = (datetime.now() - start_time).total_seconds()
         
         analysis_data = {
@@ -836,20 +902,107 @@ async def process_s3_user_video_analysis(
             "status": "completed"
         }
         
-        with get_db_session() as db:
-            save_analysis_result(db, analysis_data)
-
+        # MongoDB에 분석 결과 저장 (연결 실패 시 스킵)
+        save_success = safe_save_analysis_result(analysis_data)
+        if save_success:
+            if return_result:
+                print(f"✅ MongoDB에 분석 결과 저장 완료")
+            else:
+                print(f"✅ MongoDB에 분석 결과 저장 완료: {analysis_id}")
+        else:
+            if return_result:
+                print(f"⚠️ MongoDB 저장 실패 - 스킵됨")
+            else:
+                print(f"⚠️ MongoDB 저장 실패 - 스킵됨: {analysis_id}")
         
-        # 삭제된 save_analysis_summary 함수 호출 제거 (분석 요약 테이블 삭제됨)
+        # 7. MariaDB에 면접태도 평가 저장
+        if return_result:
+            print(f"💾 MariaDB에 면접태도 평가 저장 중...")
+        try:
+            # 점수 추출
+            emotion_score_60 = emotion_result.get('interview_score', 0)  # 60점 만점
+            eye_score_40 = eye_tracking_result.get('basic_scores', {}).get('total_eye_score', 0)  # 40점 만점
+            
+            # 부정행위 감지 결과 추출
+            suspected_copying = eye_tracking_result.get('analysis_summary', {}).get('total_violations', 0) >= 5
+            suspected_impersonation = eye_tracking_result.get('analysis_summary', {}).get('face_multiple_detected', False)
+            
+            # GPT 분석 결과에서 키워드 추출
+            strength_keywords = llm_comment.strengths if llm_comment.strengths else ['성실한 태도']
+            weakness_keywords = llm_comment.weaknesses if llm_comment.weaknesses else ['개선 필요']
+            
+            gpt_analysis = {
+                'strength_keyword': '\n'.join(strength_keywords),
+                'weakness_keyword': '\n'.join(weakness_keywords)
+            }
+            
+            mariadb_success = await mariadb_handler.save_interview_attitude(
+                user_id=user_id,
+                question_num=question_num,
+                emotion_score=emotion_score_60,
+                eye_score=eye_score_40,
+                suspected_copying=suspected_copying,
+                suspected_impersonation=suspected_impersonation,
+                gpt_analysis=gpt_analysis
+            )
+            
+            if mariadb_success:
+                if return_result:
+                    print(f"✅ MariaDB에 면접태도 평가 저장 완료 (감정:{emotion_score_60:.1f}, 시선:{eye_score_40:.1f})")
+                else:
+                    print(f"✅ MariaDB에 면접태도 평가 저장 완료: {user_id}/{question_num} (감정:{emotion_score_60:.1f}, 시선:{eye_score_40:.1f})")
+            else:
+                if return_result:
+                    print(f"⚠️ MariaDB 저장 실패")
+                else:
+                    print(f"⚠️ MariaDB 저장 실패: {user_id}/{question_num}")
+                    
+        except Exception as mariadb_error:
+            if return_result:
+                print(f"⚠️ MariaDB 저장 중 오류: {mariadb_error}")
+            else:
+                print(f"⚠️ MariaDB 저장 중 오류 ({user_id}/{question_num}): {mariadb_error}")
+        
         processing_times["save_results"] = (datetime.now() - stage_start).total_seconds()
         
-        # 최종 완료 상태 업데이트
-        await update_analysis_status(analysis_id, "completed", None, 100.0)
+        # 최종 완료 상태 업데이트 (백그라운드 모드만)
+        if not return_result:
+            await update_analysis_status(analysis_id, "completed", None, 100.0)
         
-        print(f"분석 완료: {analysis_id}")
+        if return_result:
+            print(f"🎉 분석 완료: {analysis_id} (총 {total_processing_time:.2f}초)")
+        else:
+            print(f"분석 완료: {analysis_id}")
         
+        # 결과 반환 (동기 모드만)
+        if return_result:
+            return {
+                "status": "completed",
+                "results": {
+                    "analysis_id": analysis_id,
+                    "emotion_analysis": emotion_result,
+                    "eye_tracking_analysis": eye_tracking_result,
+                    "llm_comment": {
+                        "overall_feedback": llm_comment.overall_feedback,
+                        "strengths": llm_comment.strengths,
+                        "weaknesses": llm_comment.weaknesses,
+                        "overall_score": llm_comment.overall_score
+                    },
+                    "processing_times": processing_times,
+                    "total_processing_time": total_processing_time
+                }
+            }
+        else:
+            return {
+                "status": "completed",
+                "results": analysis_data
+            }
+
     except Exception as e:
-        print(f"분석 중 오류 발생 ({analysis_id}): {str(e)}")
+        if return_result:
+            print(f"❌ 분석 중 오류 발생 ({analysis_id}): {str(e)}")
+        else:
+            print(f"분석 중 오류 발생 ({analysis_id}): {str(e)}")
         
         # 오류 상태를 MongoDB에 저장
         error_data = {
@@ -863,11 +1016,23 @@ async def process_s3_user_video_analysis(
             "status": "error"
         }
         
-        try:
-            with get_db_session() as db:
-                save_analysis_result(db, error_data)
-        except:
-            pass  # 오류 저장 실패는 무시
+        # MongoDB에 오류 정보 저장 시도 (실패해도 무시)
+        save_success = safe_save_analysis_result(error_data)
+        if save_success:
+            if return_result:
+                print(f"⚠️ MongoDB에 오류 정보 저장 완료")
+            else:
+                print(f"⚠️ MongoDB에 오류 정보 저장 완료: {analysis_id}")
+        else:
+            if return_result:
+                print(f"⚠️ MongoDB 오류 정보 저장 실패 - 스킵됨")
+            else:
+                print(f"⚠️ MongoDB 오류 정보 저장 실패 - 스킵됨: {analysis_id}")
+        
+        return {
+            "status": "error",
+            "error": str(e)
+        }
             
     finally:
         # 임시 파일 정리
@@ -892,10 +1057,13 @@ async def update_analysis_status(analysis_id: str, status: str, stage: Optional[
         elif status == "completed":
             update_data["completed_at"] = datetime.now().isoformat()
             
-        # MongoDB 업데이트
-        with get_db_session() as db:
-            # 실제 구현에서는 update 쿼리 사용
-            print(f"상태 업데이트: {analysis_id} -> {status} ({stage}, {progress}%)")
+        # MongoDB 상태 업데이트 (연결 실패 시 스킵)
+        from src.db.crud import safe_update_analysis_status
+        update_success = safe_update_analysis_status(analysis_id, status)
+        if update_success:
+            print(f"✅ 상태 업데이트: {analysis_id} -> {status} ({stage}, {progress}%)")
+        else:
+            print(f"⚠️ MongoDB 상태 업데이트 실패 - 스킵됨: {analysis_id} -> {status}")
             
     except Exception as e:
         print(f"⚠️ 상태 업데이트 실패 ({analysis_id}): {e}")
@@ -936,9 +1104,7 @@ async def process_gpt_batch():
                 print(f"[{i}/{len(batch_to_process)}] GPT 분석 시작: {analysis_id}")
                 
                 # MongoDB에서 분석 결과 가져오기
-                with get_db_session() as db:
-                    collection = db['analysis_results']
-                    doc = collection.find_one({'analysis_id': analysis_id})
+                doc = safe_get_analysis_results(analysis_id)
                 
                 if not doc:
                     print(f"⚠️ 분석 결과를 찾을 수 없음: {analysis_id}")

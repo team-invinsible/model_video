@@ -275,7 +275,7 @@ class MariaDBHandler:
         result = await cursor.fetchone()
         return result[0] > 0
 
-    def _generate_safe_id(self, user_id: str, question_num: int, suffix: str = "") -> int:
+    def _generate_safe_id(self, user_id: str, question_num, suffix: str = "") -> int:
         """안전한 ID 생성 (user_id + 0 + question_num 형식)"""
         try:
             # user_id가 숫자인 경우 그대로 사용
@@ -288,17 +288,27 @@ class MariaDBHandler:
                 # 문자열인 경우 해시 사용하되 적당한 크기로 제한
                 user_id_num = abs(hash(user_id)) % 999 + 1
 
+            # question_num 안전하게 처리 (무조건 숫자로 온다고 가정)
+            if isinstance(question_num, int):
+                question_num_int = question_num
+            elif isinstance(question_num, str) and question_num.isdigit():
+                question_num_int = int(question_num)
+            else:
+                # 숫자가 아닌 경우 기본값 1 사용
+                question_num_int = 1
+                logger.warning(f"question_num이 숫자가 아닙니다. 기본값 1을 사용합니다: {question_num}")
+
             # question_num이 너무 크면 제한
-            if question_num > 99:
-                question_num = question_num % 99 + 1
+            if question_num_int > 99:
+                question_num_int = question_num_int % 99 + 1
 
             # ID 형식: {user_id}0{question_num}{suffix}
             # 예: user_id=2, question_num=3 -> 203
             # 예: user_id=2, question_num=3, suffix="1" -> 2031
-            id_str = f"{user_id_num}0{question_num}{suffix}"
+            id_str = f"{user_id_num}0{question_num_int}{suffix}"
             generated_id = int(id_str)
 
-            logger.info(f"ID 생성: user_id={user_id} -> {user_id_num}, question_num={question_num}, suffix='{suffix}' -> ID={generated_id}")
+            logger.info(f"ID 생성: user_id={user_id} -> {user_id_num}, question_num={question_num} -> {question_num_int}, suffix='{suffix}' -> ID={generated_id}")
 
             # MySQL BIGINT 범위 확인 (최대 9223372036854775807)
             if generated_id > 9223372036854775807:
@@ -435,10 +445,20 @@ class MariaDBHandler:
                                      gpt_analysis: Dict[str, str] = None) -> bool:
         """audio.answer_score 및 answer_category_result 테이블에 면접태도 평가 저장"""
         try:
+            # question_num을 안전하게 숫자로 변환 (무조건 숫자로 온다고 가정)
+            if isinstance(question_num, str) and question_num.isdigit():
+                question_num_int = int(question_num)
+            elif isinstance(question_num, int):
+                question_num_int = question_num
+            else:
+                # 숫자가 아닌 경우 기본값 1 사용
+                question_num_int = 1
+                logger.warning(f"question_num이 숫자가 아닙니다. 기본값 1을 사용합니다: {question_num}")
+            
             # 기존 방식대로 ID 생성 (userId0questionNum 형식)
-            ans_score_id = self._generate_safe_id(user_id, int(question_num))
-            intv_ans_id = self._generate_safe_id(user_id, int(question_num))
-            ans_cat_result_id = self._generate_safe_id(user_id, int(question_num), "0")
+            ans_score_id = self._generate_safe_id(user_id, question_num_int)
+            intv_ans_id = self._generate_safe_id(user_id, question_num_int)
+            ans_cat_result_id = self._generate_safe_id(user_id, question_num_int, "0")
             
             total_score = emotion_score + eye_score
             
@@ -456,7 +476,7 @@ class MariaDBHandler:
                     
                     try:
                         # 0. interview_answer 테이블에 레코드가 존재하는지 확인하고 없으면 생성
-                        if not await self._ensure_interview_answer_exists(cursor, intv_ans_id, user_id, int(question_num)):
+                        if not await self._ensure_interview_answer_exists(cursor, intv_ans_id, user_id, question_num_int):
                             logger.warning(f"interview_answer 레코드 생성에 실패했습니다: INTV_ANS_ID={intv_ans_id}")
                         
                         # 1. answer_score 테이블에 UPSERT (기존 방식 유지)
