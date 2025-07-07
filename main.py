@@ -116,7 +116,7 @@ gpt_analyzer = GPTAnalyzer()
 async def analyze_video_from_s3_key(payload: AnalysisPayload):
     """
     메인 서버로부터 S3 Object Key를 받아 영상 분석을 완료한 후 응답을 반환합니다.
-    모든 분석 작업과 DB 저장이 완료된 후 응답을 반환합니다.
+    폴링 방식으로 분석 작업을 처리하고 완료 후 응답을 반환합니다.
     """
     try:
         s3_key = payload.s3ObjectKey
@@ -147,33 +147,69 @@ async def analyze_video_from_s3_key(payload: AnalysisPayload):
         bucket_name = os.getenv('S3_BUCKET_NAME', 'skala25a')
         session_id = f"api_triggered_{user_id}"
 
-        print(f"🎬 분석 시작: {user_id}/{question_num} -> {s3_key}")
+        print(f"🎬 분석 시작 (폴링 방식): {user_id}/{question_num} -> {s3_key}")
         
-        # 동기적으로 분석 실행 (모든 작업 완료 후 응답 반환)
-        analysis_results = await process_s3_user_video_analysis(
+        # 1. 분석 작업을 백그라운드로 시작
+        asyncio.create_task(process_s3_user_video_analysis(
             analysis_id,
             bucket_name,
             s3_key,
             user_id,
             question_num,
             session_id,
-            return_result=True
-        )
+            return_result=False
+        ))
         
-        if analysis_results["status"] == "completed":
-            return AnalysisResponse(
-                analysis_id=analysis_id,
-                status="completed",
-                message=f"사용자 {user_id}, 질문 {question_num} 영상 분석이 완료되었습니다.",
-                results=analysis_results["results"]
-            )
-        else:
-            return AnalysisResponse(
-                analysis_id=analysis_id,
-                status="error",
-                message=f"분석 중 오류가 발생했습니다: {analysis_results.get('error', 'Unknown error')}",
-                results=None
-            )
+        print(f"🔄 백그라운드 분석 시작됨: {analysis_id}")
+        
+        # 2. 폴링을 통해 분석 완료 대기
+        max_polling_time = 900  # 15분
+        polling_interval = 5    # 5초
+        polling_count = 0
+        max_polls = max_polling_time // polling_interval
+        
+        while polling_count < max_polls:
+            await asyncio.sleep(polling_interval)
+            polling_count += 1
+            
+            # MongoDB에서 분석 결과 확인
+            try:
+                result = safe_get_analysis_results(analysis_id)
+                
+                if result:
+                    status = result.get("status", "processing")
+                    print(f"📊 분석 상태 확인 ({polling_count}/{max_polls}): {status}")
+                    
+                    if status == "completed":
+                        print(f"✅ 분석 완료: {analysis_id}")
+                        return AnalysisResponse(
+                            analysis_id=analysis_id,
+                            status="completed",
+                            message=f"사용자 {user_id}, 질문 {question_num} 영상 분석이 완료되었습니다.",
+                            results=result
+                        )
+                    elif status == "error":
+                        error_msg = result.get("error", "Unknown error")
+                        print(f"❌ 분석 오류: {analysis_id} - {error_msg}")
+                        return AnalysisResponse(
+                            analysis_id=analysis_id,
+                            status="error",
+                            message=f"분석 중 오류가 발생했습니다: {error_msg}",
+                            results=None
+                        )
+                else:
+                    print(f"⏳ 분석 대기 중 ({polling_count}/{max_polls}): {analysis_id}")
+                    
+            except Exception as polling_error:
+                print(f"⚠️ 폴링 중 오류 (시도 {polling_count}): {str(polling_error)}")
+                continue
+        
+        # 3. 타임아웃 발생
+        print(f"⏰ 분석 타임아웃: {analysis_id}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"분석 시간 초과 (15분). 분석 ID: {analysis_id}"
+        )
 
     except HTTPException as http_exc:
         raise http_exc
